@@ -339,7 +339,7 @@ app.layout = html.Div(
         # figure-store：整合 Tkinter 後，Interval 輪詢 shared_state 寫入此處
         dcc.Store(id="figure-store"),
         # stid-store：當前主測站代碼（Tkinter push_figure 時一併更新）
-        dcc.Store(id="stid-store", data=_DEMO_STID),
+        dcc.Store(id="stid-store", data=None),
         dcc.Store(id="bundle-key-store", data=None),
         dcc.Interval(id="bundle-poll", interval=500, n_intervals=0),
 
@@ -379,10 +379,21 @@ app.layout = html.Div(
                 # ── 左：圖表區 ────────────────────────────────────────────────
                 html.Div(
                     style={"flex": "3", "minWidth": 0},
-                    children=[
+                    # children=[
+                    children=dcc.Loading(
+                        id="loading-graph",
+                        type="circle",
+                        color="#7eb8f7",
+                        children=[
                         dcc.Graph(
                             id="main-graph",
-                            figure=make_demo_figure(),
+                            # figure=go.Figure(),
+                            # 初始化即採用深色底，避免視覺閃爍
+                            figure=go.Figure(layout=dict(
+                                template="plotly_dark",
+                                paper_bgcolor="#1E1E1E",
+                                plot_bgcolor="#1E1E1E"
+                            )),
                             config={
                                 "scrollZoom": False,
                                 # Box Select (□) 與 Lasso Select 加到工具列
@@ -398,7 +409,8 @@ app.layout = html.Div(
                             style={
                                 "borderRadius": "8px",
                                 "boxShadow": "0 2px 8px rgba(0,0,0,.12)",
-                                "backgroundColor": "white",
+                                # "backgroundColor": "white",
+                                 "backgroundColor": "#1E1E1E", #改這行好像沒用
                             },
                         ),
                         html.P(
@@ -411,7 +423,8 @@ app.layout = html.Div(
                                 "paddingLeft": "4px",
                             },
                         ),
-                    ],
+                    # ],
+                    ]),
                 ),
 
                 # ── 右：QC 控制面板 ───────────────────────────────────────────
@@ -849,31 +862,44 @@ def on_selection(selected_data, mode, new_qc, operator, operand, stid):
     Output("bundle-key-store", "data"),
     Input("bundle-poll",       "n_intervals"),
     State("bundle-key-store",  "data"),
-    prevent_initial_call=True,
 )
 def poll_bundle(n_intervals, current_key):
     latest = dash_bridge.get_latest_key()
-    print(f"[poll] latest={latest}, current={current_key}")
-    if latest and latest != current_key:
-        return latest
+    # 如果橋接層有新資料，立即更新 Store
+    if latest:
+        if latest != current_key:
+            return latest
+    # # 若為第一次執行且橋接層無資料（代表可能是獨立啟動 dash_app.py 進行開發測試）
+    # 為了跳轉畫面美觀關掉試試
+    # elif n_intervals == 0:
+    #     return "demo"
+        
     return no_update
 
 
 @app.callback(
     Output("main-graph", "figure"),
+    Output("stid-store", "data"),
     Input("bundle-key-store", "data"),
 )
-
 def render_water_figure(key):
     if not key:
-        return no_update
+        return no_update, no_update
+        
+    # 處理開發模式下的 Demo 展示
+    if key == "demo":
+        return make_demo_figure(), _DEMO_STID
+
     bundle = dash_bridge.get_bundle(key)
     if bundle is None:
-        return no_update
+        return no_update, no_update
+        
     bundles = bundle if isinstance(bundle, list) else [bundle] #強制把格式改成list傳遞給build_water_figure，以免單一值時格式為bundle（dict）報錯。因為該函式設計只接受list
+    # 從資料中動態取得 STID 並更新 Store，確保 SQL 產生器抓到正確的測站
+    primary_stid = bundles[0].get("stid", _DEMO_STID) if bundles else _DEMO_STID
+    
     lr = dash_bridge.get_land_range()          # ← 加這行
-    # print(f"[render] land_range={lr}")          # ← 加這行
-    return build_water_figure(bundles, land_range=lr)   # ← 改這行
+    return build_water_figure(bundles, land_range=lr), primary_stid
 
 
 # -------貼在現有 callbacks 區塊末尾，不影響任何既有邏輯：--------
