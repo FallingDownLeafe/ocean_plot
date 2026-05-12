@@ -311,7 +311,8 @@ class SqlDialog(tk.Toplevel):
 
         self._txt = tk.Text(
             frame, wrap=tk.NONE,
-            font=("Courier New", 11),
+            # font=("Courier New", 11),
+            font=("標楷體", 11), # 將 Courier New 改為標楷體
             xscrollcommand=xsb.set, yscrollcommand=ysb.set,
             relief=tk.FLAT, bg="#1e1e1e", fg="#d4d4d4",
             insertbackground="white", selectbackground="#264f78"

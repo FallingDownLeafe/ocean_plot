@@ -26,7 +26,8 @@ from plotly.subplots import make_subplots
 _TYPE_COLORS = {2: '#1f77b4', 3: '#0d47a1', 4: '#64b5f6'}
 _DIFF_COLORS = ['#ff7f0e', '#e377c2', '#17becf']
 
-_FONT = "Noto Sans TC, PingFang TC, Microsoft JhengHei, Arial, sans-serif"
+# _FONT = "Noto Sans TC, PingFang TC, Microsoft JhengHei, Arial, sans-serif"
+_FONT = "標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif"
 
 
 def build_water_figure(bundles: list, land_range=None) -> go.Figure:

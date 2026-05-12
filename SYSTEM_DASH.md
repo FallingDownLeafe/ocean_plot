@@ -362,8 +362,56 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 此行已加入所有讀取 `tide6`、`stemp6`、`stemp1` 的程式碼段後。
 
 ---
+## 6. 視覺規範與樣式定義 (Visual Standards)
 
-## 6. 已知限制與待辦事項
+  本系統採用 Dark Mode 視覺風格，針對長時間監控需求設計，並針對 Windows 環境下的中文字體顯示進行優化。
+
+  a. 核心配色表 (Color Palette)
+  ┌──────────────────────┬────────────────────────┬────────────────────────────────┐
+  │ 項目                 │ HEX 色碼               │ 視覺用途                       │
+  ├──────────────────────┼────────────────────────┼────────────────────────────────┤
+  │ Global Background    │ #111820                │ 系統底色、下拉選單、狀態列背景 │
+  │ Plot/Text Background │ #1E1E1E                │ 圖表繪圖區背景、SQL 輸出區背景 │
+  │ Panel Background     │ #1E2A3A                │ 右側 QC 控制面板背景           │
+  │ Header/Accent        │ #1A3A5C                │ 頂部標題列、區塊標題底色       │
+  │ Border/Highlight     │ rgba(200,214,229,0.25) │ 邊框、格線、半透明強調色       │
+  │ Primary Text         │ #CCD0D4                │ 一般標籤與選單文字色           │
+  └──────────────────────┴────────────────────────┴────────────────────────────────┘
+
+  b. 字體系統 (Typography)
+  為確保在 Windows 等寬環境下 SQL 指令與測站清單能精確對齊，優先選用「標楷體」。
+   * UI 字體：標楷體, Noto Sans TC, Segoe UI, Arial, sans-serif
+   * 等寬字體：標楷體, Courier New, Consolas, monospace (應用於 SQL 輸出、測站代碼對齊)
+   * 圖表字體：標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif
+
+  c. 圖表組件規範 (Plotly Styles)
+   * 範本 (Template)：統一套用 plotly_dark。
+   * 交互模式：hovermode='x unified' (十字準星) 且 uirevision=True (鎖定縮放視圖)。
+   * CSS 覆蓋：透過 assets/custom.css 強制修正 Dash Dropdown 預設亮色樣式，確保選單背景為 #111820 並具備懸停高亮效果。
+
+  ---
+
+## 7. 系統微調與更新紀錄 (2026-05)
+
+  本章節紀錄 2026 年 5 月期間針對系統穩定性、視覺體驗及操作效率所做的微調優化。
+
+  1. UI/UX 增強
+   * Y 軸範圍手動控制：於 Dash 右側面板新增 §0 區塊，支援手動輸入水位上限與下限。點擊「套用」後可同步調整所有水位子圖的垂直範圍，方便排除極端雜訊。
+   * SQL 複製優化：在 SQL 輸出區右上方整合 dcc.Clipboard 按鈕，點擊即可一鍵複製生成的 UPDATE 指令，不需手動框選文字。
+
+  2. 測站清單管理 (Tkinter)
+   * 動態活站篩選 (Dynamic Filter)：新增「只列有資料站」按鈕。系統會根據當前選擇的時間範圍，即時查詢 tide6 資料表，僅保留有觀測紀錄的測站，節省無效查詢時間。
+   * 單位快速選取：新增「選氣象署」與「非氣象署」按鈕。依據 sponsor_map 對應之業務單位執行批次勾選動作，方便處理不同權責來源的資料。
+
+  3. 數據與繪圖邏輯升級
+   * 多儀器自動識別：支援同地點「音波、壓力、雷達」多台水位儀器自動併圖顯示，並自動計算主/備儀器間的差值 (Diff) 顯示於右側 Y 軸。
+   * 新增趨勢線 (EWMA)：引入指數加權移動平均線 (alpha=0.05)，相較於傳統移動平均線更能即時反應變動且減少邊界缺點，預設於圖例中隱藏。
+   * 天文潮支援 (QC='a')：資料查詢路徑新增對 tide6ha 中 QC='a' (天文潮重建) 欄位的支援，提供多維度的預報比對。
+   * Error Bar 平滑輔助線：在「水位細節」模式中提供 1H 平均值線，並附帶標準差誤差棒，輔助判斷資料離散程度。
+
+---
+
+## 8. 已知限制與待辦事項
 
 ### 功能面
 
@@ -386,7 +434,7 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 
 ---
 
-## 7. 打包注意事項（PyInstaller）
+## 9. 打包注意事項（PyInstaller）
 
 ### mysql.connector 必須使用 `--collect-all`
 

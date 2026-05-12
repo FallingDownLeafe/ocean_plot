@@ -62,7 +62,9 @@ DB_USER = os.getenv("DB_USER", "dps")
 # --- [新增] 跨平台字體動態適應 ---
 OS_TYPE = platform.system()
 if OS_TYPE == "Windows":
-    UI_FONT = "UI_FONT"
+    # UI_FONT = "UI_FONT"
+    UI_FONT = "標楷體"  # Gemini Code assist 說 Tkinter 的 font 參數在 tuple 形式下，第一個元素應為單一字體名稱
+    # UI_FONT = "標楷體, Microsoft JhengHei, Noto Sans CJK TC, Arial, sans-serif"
 elif OS_TYPE == "Darwin": # macOS
     UI_FONT = "PingFang TC"
 else: # Linux
@@ -74,6 +76,8 @@ class OceanDataEngine:
             self.host = host
             self.user = user
             self.database = database
+            self.conty_map = {} # [新增] 初始化縣市對照表
+            self.sponsor_map = {} # [新增] 初始化業務單位對照表
             # --- [核心修改 1] 外部參數引入 ---
             # 讀取 .env 中的設定，如果沒有設定，就預設為安外(開發區)的模式
             self.typhoon_db = os.getenv("TYPHOON_DB", "med_data") # 安內請在 .env 設為 mrbank
@@ -110,8 +114,13 @@ class OceanDataEngine:
             
         stids = self.mapping_df['STID'].dropna().unique().tolist()
         cursor = self.conn.cursor(dictionary=True)
-        cursor.execute(f"SELECT stid, stnac FROM {self.tables['st']} WHERE stid IN ({','.join(['%s']*len(stids))})", tuple(stids))
-        self.name_map = {str(r['stid']).strip(): str(r['stnac']) if r['stnac'] else "未命名" for r in cursor.fetchall()}
+        cursor.execute(f"SELECT stid, stnac, conty, sponsor FROM {self.tables['st']} WHERE stid IN ({','.join(['%s']*len(stids))}) AND kind = '6'", tuple(stids))
+        # self.name_map = {str(r['stid']).strip(): str(r['stnac']) if r['stnac'] else "未命名" for r in cursor.fetchall()}
+        # [修正] 先將結果取出存入 rows，避免 cursor 被一次性消耗完畢
+        rows = cursor.fetchall() 
+        self.name_map = {str(r['stid']).strip(): str(r['stnac']) if r['stnac'] else "未命名" for r in rows}
+        self.conty_map = {str(r['stid']).strip(): str(r['conty']) if r.get('conty') else "未知" for r in rows}
+        self.sponsor_map = {str(r['stid']).strip(): str(r['sponsor']) if r.get('sponsor') else "未知" for r in rows}
 
     def fetch_years(self):
         if self.host == "127.0.0.1": return [] # 本地模式直接跳過
@@ -497,7 +506,7 @@ class OceanDataEngine:
                 elif kind == '8': # 浮標 -> pres1
                     df_p = self.expand_data(pd.read_sql(f"SELECT * FROM pres1 WHERE STID='{cid}' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn), 'P', '1h')
                     if not df_p.empty: df_p['P'] *= 0.1
-                elif kind == '7': # 潮位站 -> pres6
+                elif kind == '6': # 潮位站 -> pres6
                     df_p = self.expand_data(pd.read_sql(f"SELECT * FROM pres6 WHERE STID='{cid}' AND DATATIME BETWEEN '{s_s}' AND '{e_s}' AND QC = 'Q'", self.conn), 'P', '1h')
                     if not df_p.empty: df_p['P'] *= 0.1
                 
@@ -511,9 +520,9 @@ class OceanDataEngine:
                 df_w = pd.DataFrame()
                 if kind in ['1', '2', '3']: # 氣象站 -> meteo
                     df_w = pd.read_sql(f"SELECT DATATIME as Time, (ws*0.1) as WS, wd as WD FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
-                elif kind in ['7', '8']: # 潮位站/浮標 -> wind
+                elif kind in ['6', '8']: # 潮位站/浮標 -> wind
                     # 決定 Z 值: 潮位站 Z=6, 浮標 Z=2 或 3
-                    z_condition = "Z='6'" if kind == '7' else "Z IN ('2', '3')"
+                    z_condition = "Z='6'" if kind == '6' else "Z IN ('2', '3')"
                     raw_w = pd.read_sql(f"SELECT TIME as Time, (VM*0.1) as WS, DM as WD, Z, qc as QC FROM wind WHERE STID='{cid}' AND {z_condition} AND TIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
                     if not raw_w.empty:
                         raw_w['Time'] = pd.to_datetime(raw_w['Time']).dt.floor('min')
@@ -538,12 +547,12 @@ class OceanDataEngine:
                 df_at = pd.DataFrame()
                 if kind in ['1', '2', '3']: # 氣象站 -> meteo
                     df_at = pd.read_sql(f"SELECT DATATIME as Time, (t*0.1) as AT FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
-                elif kind in ['7', '8']: # 潮位站/浮標 -> stemp6 / stemp1 (Z=-3)
-                    table = 'stemp6' if kind == '7' else 'stemp1'
+                elif kind in ['6', '8']: # 潮位站/浮標 -> stemp6 / stemp1 (Z=-3)
+                    table = 'stemp6' if kind == '6' else 'stemp1'
                     raw_at = pd.read_sql(f"SELECT * FROM {table} WHERE STID='{cid}' AND Z='-3' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
                     if not raw_at.empty:
                         raw_at.columns = [c.upper() for c in raw_at.columns]
-                    if kind == '7' and not raw_at.empty and 'QC' in raw_at.columns:
+                    if kind == '6' and not raw_at.empty and 'QC' in raw_at.columns:
                         # stemp6 有 QC 欄位，拆分正常與異常
                         raw_at['QC_UP'] = raw_at['QC'].str.upper()
                         at_q   = raw_at[raw_at['QC_UP'] == 'Q']
@@ -572,7 +581,7 @@ class OceanDataEngine:
                     raw_wt = pd.read_sql(f"SELECT * FROM stemp1 WHERE STID='{cid}' AND Z='0' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
                     df_wt = self.expand_data(raw_wt, 'WT', '1h')
                     if not df_wt.empty: df_wt['WT'] *= 0.1
-                elif kind == '7': # 潮位站 -> stemp6 (Z=0)
+                elif kind == '6': # 潮位站 -> stemp6 (Z=0)
                     raw_wt = pd.read_sql(f"SELECT * FROM stemp6 WHERE STID='{cid}' AND Z='0' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
                     if not raw_wt.empty:
                         raw_wt.columns = [c.upper() for c in raw_wt.columns]
@@ -933,7 +942,7 @@ def draw_diagnostic(bundles, land_range=None):
             if 'WS' in df.columns:
                 grp_name = f"wind_{b['stid']}"
                 w_label = get_src_label(sids['w'], '風速')
-                fig.add_trace(go.Scatter(
+                fig.add_trace(go.Scattergl(
                     x=df['Time'], y=df['WS'], name=w_label, legendgroup=grp_name,
                     mode='lines+markers',
                     connectgaps=False, line=dict(color='#9467bd', width=1.2),
@@ -944,7 +953,7 @@ def draw_diagnostic(bundles, land_range=None):
                     ws_raw_mask = df['WS_raw'].notna()
                     if ws_raw_mask.any():
                         ws_customdata = df.loc[ws_raw_mask, 'WS_QC_raw'].fillna('?').values if 'WS_QC_raw' in df.columns else ['?'] * ws_raw_mask.sum()
-                        fig.add_trace(go.Scatter(
+                        fig.add_trace(go.Scattergl(
                             x=df.loc[ws_raw_mask, 'Time'], y=df.loc[ws_raw_mask, 'WS_raw'],
                             name=f"⚠️ 風速 原始值(QC≠Q)", legendgroup=grp_name,
                             mode='markers',
@@ -959,7 +968,7 @@ def draw_diagnostic(bundles, land_range=None):
                     arrow_df['WD'] = pd.to_numeric(arrow_df['WD'], errors='coerce').dropna()
                     if not arrow_df.empty:
                         w_dir_label = get_src_label(sids['w'], '風向')
-                        fig.add_trace(go.Scatter(
+                        fig.add_trace(go.Scattergl(
                             x=arrow_df['Time'], y=arrow_df['WS'], mode='markers', 
                             name=w_dir_label, legendgroup=grp_name, showlegend=False,
                             marker=dict(symbol='arrow', size=10, color='#800080', angle=(arrow_df['WD'] + 180) % 360),
@@ -969,7 +978,7 @@ def draw_diagnostic(bundles, land_range=None):
             if 'V' in df.columns:
                 grp_name = f"curr_{b['stid']}"
                 v_label = get_src_label(sids['wv'], '流速')
-                fig.add_trace(go.Scatter(
+                fig.add_trace(go.Scattergl(
                     x=df['Time'], y=df['V'], name=v_label, legendgroup=grp_name,
                     mode='lines+markers',
                     connectgaps=True, line=dict(color='#c5b0d5', width=1, dash='dash'),
@@ -982,7 +991,7 @@ def draw_diagnostic(bundles, land_range=None):
                     c_arrow['DIR'] = pd.to_numeric(c_arrow['DIR'], errors='coerce').dropna()
                     if not c_arrow.empty:
                         v_dir_label = get_src_label(sids['wv'], '流向')
-                        fig.add_trace(go.Scatter(
+                        fig.add_trace(go.Scattergl(
                             x=c_arrow['Time'], y=c_arrow['V'], mode='markers', 
                             name=v_dir_label, legendgroup=grp_name, showlegend=False,
                             marker=dict(symbol='arrow', size=3, color="#a03fea", angle=c_arrow['DIR']),
@@ -1341,7 +1350,7 @@ def draw_water_only(bundles, land_range=None):
         template="plotly_dark",
         height=600 * len(bundles), # 加大高度讓細節更清楚
         hovermode="x unified",
-        font=dict(family="UI_FONT", size=12),
+        font=dict(family=UI_FONT, size=12),
         uirevision=True # [新增] 鎖定 UI 狀態：點擊圖例時保留目前的縮放/平移視圖
     )
     
@@ -1367,18 +1376,18 @@ def draw_water_only(bundles, land_range=None):
 class LoginWin:
     def __init__(self):
         self.root = tk.Tk(); self.root.title("系統登入"); self.root.geometry("330x230")
-        # self.root.option_add('*Font', 'UI_FONT 12') #原本claude寫的，gemini code建議改成下面那行，目前還不知道有什麼差別
+        # self.root.option_add('*Font', 'UI_FONT 12') #這是原本claude寫的，gemini code一直建議改成下面那行
         self.root.option_add('*Font', f'{UI_FONT} 12')
-        tk.Label(self.root, text="海洋動力診斷儀表板", font=("UI_FONT", 14, "bold")).pack(pady=(10, 5))
+        tk.Label(self.root, text="海洋動力診斷儀表板", font=(UI_FONT, 14, "bold")).pack(pady=(10, 5))
         
         # 新增切換選項：本地模式
         self.is_local = tk.BooleanVar(value=False)
         self.cb_local = tk.Checkbutton(self.root, text="切換至 Localhost 測試模式", 
-                                       variable=self.is_local, font=("UI_FONT", 10), fg="blue")
+                                       variable=self.is_local, font=(UI_FONT, 10), fg="blue")
         self.cb_local.pack()
 
         self.info_label = tk.Label(self.root, text=f"預設連線: {DB_IP} ({DB_USER})", 
-                                   fg="#666", font=("UI_FONT", 9))
+                                   fg="#666", font=(UI_FONT, 9))
         self.info_label.pack()
 
         # self.pw = tk.Entry(self.root, show="*"); self.pw.pack(pady=10); self.pw.focus_set() ## 星號視覺上有點過時
@@ -1430,7 +1439,9 @@ if __name__ == "__main__":
                     time.sleep(1.5)
 
                     self.root = tk.Tk(); self.root.title("海洋動力診斷系統 v5.0"); self.root.geometry("650x850")
-                    self.root.option_add('*Font', 'UI_FONT 14')
+                    # self.root.option_add('*Font', 'UI_FONT 14') #這是原本claude寫的，gemini code一直建議改成下面那行
+                    self.root.option_add('*Font', f'{UI_FONT} 14')
+                    self.root.option_add('*TCombobox*Listbox.font', (UI_FONT, 12)) # 確保下拉選單彈出的清單字體統一
                     
                     # ← 屬性要先定義，build_ui() 才能用到它們
                     self._last_stid = ""    # ← 新增：記錄最後一次畫圖的站台
@@ -1476,36 +1487,79 @@ if __name__ == "__main__":
                         self._sql_dlg = SqlDialog(self.root)
                     self._sql_dlg.update_content(sql, info)
 
+                def select_by_agency(self, target_agency, exclude=False):
+                    """根據業務單位自動勾選測站，支援排除模式"""
+                    # 先清除目前所有選取
+                    self.lb.selection_clear(0, tk.END)
+                    # 遍歷 mapping_df 找出符合單位的測站索引
+                    for i, r in self.e.mapping_df.iterrows():
+                        sid = str(r['STID']).strip()
+                        agency = self.e.sponsor_map.get(sid, "未知")
+                        is_target = target_agency in agency
+                        # 如果 (排除模式 且 不包含關鍵字) OR (包含模式 且 包含關鍵字)
+                        if (exclude and not is_target) or (not exclude and is_target):
+                            self.lb.select_set(i)
+
+                def filter_active_stations(self):
+                    """查詢資料庫，僅保留目前所選時間範圍內有資料的測站"""
+                    try:
+                        self.root.config(cursor="watch"); self.root.update()
+                        s = self.sd.get_date().strftime('%Y-%m-%d 00:00:00')
+                        e = self.ed.get_date().strftime('%Y-%m-%d 23:59:59')
+                        # 查詢 tide6 找出該時段有產出資料的 STID 清單
+                        query = f"SELECT DISTINCT STID FROM {self.e.tables['tide6']} WHERE DATATIME BETWEEN '{s}' AND '{e}'"
+                        active_stids = set(pd.read_sql(query, self.e.conn)['STID'].astype(str).str.strip())
+                        
+                        self.lb.delete(0, tk.END)
+                        count = 0
+                        for _, r in self.e.mapping_df.iterrows():
+                            sid = str(r['STID']).strip()
+                            if sid in active_stids:
+                                count += 1
+                                stn, cty, agy = self.e.name_map.get(sid, "未知"), self.e.conty_map.get(sid, "未知"), self.e.sponsor_map.get(sid, "未知")
+                                self.lb.insert(tk.END, f"{count:2d}. [{sid:<6}] {stn} ({cty})({agy})")
+                        if count == 0: messagebox.showinfo("篩選結果", "所選時段內資料庫完全沒有任何測站的資料。")
+                    except Exception as ex: messagebox.showerror("錯誤", f"篩選失敗：{ex}")
+                    finally: self.root.config(cursor="")
+
+                def reset_station_list(self):
+                    """還原顯示所有原始測站清單"""
+                    self.lb.delete(0, tk.END)
+                    for i, r in self.e.mapping_df.iterrows():
+                        sid = str(r['STID']).strip()
+                        stn, cty, agy = self.e.name_map.get(sid, "未知"), self.e.conty_map.get(sid, "未知"), self.e.sponsor_map.get(sid, "未知")
+                        self.lb.insert(tk.END, f"{i+1:2d}. [{sid:<6}] {stn} ({cty})({agy})")
+
                 def build_ui(self):
                     # 原本的白色底設定（有點懶得改，先不動）
-                    tk.Label(self.root, text=f"連線伺服器: {self.e.host} | 帳號: {self.e.user}", fg="#666", font=("UI_FONT", 10)).pack(pady=5)
+                    tk.Label(self.root, text=f"連線伺服器: {self.e.host} | 帳號: {self.e.user}", fg="#666", font=(UI_FONT, 10)).pack(pady=5)
                     
                     is_local = (self.e.host == "127.0.0.1")
-                    f1 = tk.LabelFrame(self.root, text="1. 颱風與日期" + (" (測試模式停用颱風)" if is_local else "(颱風非必選)"), padx=10, pady=5); f1.pack(fill="x", padx=20)
+                    f1 = tk.LabelFrame(self.root, text="1. 颱風與日期" + (" (測試模式停用颱風)" if is_local else "(颱風非必選)"), font=(UI_FONT), padx=10, pady=5); f1.pack(fill="x", padx=20)
                     
                     years = self.e.fetch_years() if not is_local else []
-                    self.yr_cb = ttk.Combobox(f1, values=years, state="readonly" if not is_local else "disabled", width=12); self.yr_cb.pack(side="left")
+                    self.yr_cb = ttk.Combobox(f1, values=years, state="readonly" if not is_local else "disabled", width=12, font=(UI_FONT)); self.yr_cb.pack(side="left")
                     if not is_local: self.yr_cb.bind("<<ComboboxSelected>>", self.on_yr)
                     
-                    self.ty_cb = ttk.Combobox(f1, state="readonly" if not is_local else "disabled", width=25); self.ty_cb.pack(side="left", padx=10)
+                    self.ty_cb = ttk.Combobox(f1, state="readonly" if not is_local else "disabled", width=25, font=(UI_FONT)); self.ty_cb.pack(side="left", padx=10)
                     if not is_local: self.ty_cb.bind("<<ComboboxSelected>>", self.on_ty)
-                    if is_local: tk.Label(f1, text="本地連線中，請手動選擇日期", fg="blue", font=("UI_FONT", 9)).pack(side="left")
+                    if is_local: tk.Label(f1, text="本地連線中，請手動選擇日期", fg="blue", font=(UI_FONT, 9)).pack(side="left")
 
                     # 1. 起始時間行 (建立一個 Frame 橫向排列)
                     f_sd = tk.Frame(self.root)
                     f_sd.pack(pady=5) # 這一行的垂直間距
-                    tk.Label(f_sd, text="起始時間:").pack(side="left")
-                    self.sd = DateEntry(f_sd, width=15, date_pattern='yyyy-mm-dd')
+                    tk.Label(f_sd, text="起始時間:", font=(UI_FONT)).pack(side="left")
+                    self.sd = DateEntry(f_sd, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT))
                     self.sd.pack(side="left", padx=5) # padx 讓文字跟輸入框有點距離
                     # 2. 結束時間行
                     f_ed = tk.Frame(self.root)
                     f_ed.pack(pady=5)
-                    tk.Label(f_ed, text="結束時間:").pack(side="left")
-                    self.ed = DateEntry(f_ed, width=15, date_pattern='yyyy-mm-dd')
+                    tk.Label(f_ed, text="結束時間:", font=(UI_FONT)).pack(side="left")
+                    self.ed = DateEntry(f_ed, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT))
                     self.ed.pack(side="left", padx=5)
 
-                    tk.Label(self.root, text="海洋參數模式下，建議查詢範圍不超過 45 天，每次建議選取 12 站以內。", fg="red", font=("UI_FONT", 10)).pack(pady=(0, 5))
-                    tk.Label(self.root, text="水位細節模式下，建議查詢範圍不超過 365 天，每次建議選取 45 站以內。", fg="red", font=("UI_FONT", 10)).pack(pady=(0, 5))
+                    tk.Label(self.root, text="海洋參數模式下，建議查詢範圍不超過 45 天，每次建議選取 12 站以內。", fg="red", font=(UI_FONT, 10)).pack(pady=(0, 5))
+                    tk.Label(self.root, text="水位細節模式下，建議查詢範圍不超過 365 天，每次建議選取 45 站以內。", fg="red", font=(UI_FONT, 10)).pack(pady=(0, 5))
 
                     # --- [修改] 全選/取消按鈕區塊 ---
                     # 1. 建立一個容器，但不讓它過度撐開
@@ -1516,35 +1570,60 @@ if __name__ == "__main__":
                     # relief="raised": 設定為凸起樣式 (看起來像立體按鈕)
                     # bd=2: 邊框厚度
                     # bg="#e1e1e1": 淺灰色背景，增加辨識度
-                    tk.Button(btn_frame, text="全部選取", font=("UI_FONT", 10), width=8, 
+                    tk.Button(btn_frame, text="全部選取", font=(UI_FONT, 10), width=8, 
                             bg="#e1e1e1", bd=2, relief="raised",
                             command=lambda: self.lb.select_set(0, tk.END)).pack(side="left", padx=(0, 5)) 
                             # padx=(0, 5) 意思是右邊留 5px 的縫隙給下一個按鈕
                     
                     # 3. 取消全選按鈕
-                    tk.Button(btn_frame, text="全部取消", font=("UI_FONT", 10), width=8, 
+                    tk.Button(btn_frame, text="全部取消", font=(UI_FONT, 10), width=8, 
                             bg="#e1e1e1", bd=2, relief="raised",
-                            command=lambda: self.lb.selection_clear(0, tk.END)).pack(side="left")
+                            command=lambda: self.lb.selection_clear(0, tk.END)).pack(side="left", padx=(0, 5))
                     # # --- [修改結束] 全選/取消按鈕區塊 ---
+                    # --- 將功能性按鈕靠右對齊，注意 pack 順序會決定從右往左的排列 ---
+                    # 4. [新增]選氣象署所有測站按鈕
+                    tk.Button(btn_frame, text="選氣象署", font=(UI_FONT, 10), width=8, 
+                            bg="#e1e1e1", bd=2, relief="raised",
+                            command=lambda: self.select_by_agency("中央氣象署")).pack(side="left", padx=(0, 5))
+                    # 5. [新增]選非氣象署所有測站按鈕
+                    tk.Button(btn_frame, text="非氣象署", font=(UI_FONT, 10), width=8, 
+                            bg="#e1e1e1", bd=2, relief="raised",
+                            command=lambda: self.select_by_agency("中央氣象署", exclude=True)).pack(side="left", padx=(0, 5))
+                    tk.Button(btn_frame, text="重設清單", font=(UI_FONT, 10), width=8, 
+                            bg="#d1dfe7", bd=2, relief="raised",
+                            command=self.reset_station_list).pack(side="right", padx=(5, 0))
+                    tk.Button(btn_frame, text="只列有資料站", font=(UI_FONT, 10), width=12, 
+                            bg="#d1e7dd", bd=2, relief="raised",
+                            command=self.filter_active_stations).pack(side="right", padx=(5, 0))
 
-                    self.lb = tk.Listbox(self.root, selectmode="multiple", font=("UI_FONT", 10)) ##測站清單原本字體是Courier New，比較能對齊
+                            
+
+                    self.lb = tk.Listbox(self.root, selectmode="multiple", font=(UI_FONT, 10)) ##測站清單原本字體是Courier New，比較能對齊
                     for i, r in self.e.mapping_df.iterrows():
-                        stn = self.e.name_map.get(str(r['STID']).strip(), "未知")
-                        self.lb.insert(tk.END, f"{i+1:2d}. [{r['STID']:<6}] {stn}")
+                        # stn = self.e.name_map.get(str(r['STID']).strip(), "未知")
+                        # self.lb.insert(tk.END, f"{i+1:2d}. [{r['STID']:<6}] {stn}")
+                        sid = str(r['STID']).strip()
+                        stn = self.e.name_map.get(sid, "未知")
+                        cty = self.e.conty_map.get(sid, "未知")
+                        agency = self.e.sponsor_map.get(sid, "未知")
+                        
+                        # [修正] 組合顯示字串，顯示格式如： 1. [1176  ] 基隆 (基隆市)
+                        display_text = f"{i+1:2d}. [{sid:<6}] {stn} ({cty})({agency})" #（注意這裡的括號是全形的，確保在等寬字體下對齊）
+                        self.lb.insert(tk.END, display_text)
                     self.lb.pack(fill="both", expand=True, padx=20)
                     # tk.Button(self.root, text="生成診斷報表", bg="#28a745", fg="#FFFFFF", font=("UI_FONT", 10, "bold"), command=self.go).pack(pady=10) #字體本來是Arial
 
                     # ── QC 操作設定框 ──────────────────────────────
-                    f_qc = tk.LabelFrame(self.root, text="框選操作設定", padx=8, pady=5)
+                    f_qc = tk.LabelFrame(self.root, text="框選操作設定", font=(UI_FONT), padx=8, pady=5)
                     f_qc.pack(fill="x", padx=20, pady=(0, 5))
 
                     # Mode 選擇
-                    tk.Radiobutton(f_qc, text="Mode 1：更新 QC 值",
+                    tk.Radiobutton(f_qc, text="Mode 1：更新 QC 值", font=(UI_FONT),
                                 variable=self._qc_mode, value="1").grid(row=0, column=0, sticky="w")
                     tk.Spinbox(f_qc, textvariable=self._new_qc, from_=0, to=9,
-                            width=4).grid(row=0, column=1, sticky="w", padx=(4, 0))
+                            width=4, font=(UI_FONT)).grid(row=0, column=1, sticky="w", padx=(4, 0))
 
-                    tk.Radiobutton(f_qc, text="Mode 2：MIN 四則運算",
+                    tk.Radiobutton(f_qc, text="Mode 2：MIN 四則運算", font=(UI_FONT),
                                 variable=self._qc_mode, value="2").grid(row=1, column=0, sticky="w")
                     ttk.Combobox(f_qc, textvariable=self._op,
                                 values=["+", "-", "*", "/"], width=3,
@@ -1561,12 +1640,12 @@ if __name__ == "__main__":
                     #         command=self.show_stats).pack(side="left", padx=5)
 
                     ## 加入查看水位細節按鈕，用不同mode呼叫go函式
-                    tk.Button(btn_box, text=" 🔍 查看水位細節", bg="#3a17b8", fg="#FFFFFF", font=("UI_FONT", 10, "bold"),
+                    tk.Button(btn_box, text=" 🔍 查看水位細節", bg="#3a17b8", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),
                   command=lambda: self.go(mode="water")).pack(side="left", padx=10)
                     # [修改] 使用 lambda 傳遞 mode="full"
-                    tk.Button(btn_box, text="查看海洋參數", bg="#28a745", fg="#FFFFFF", font=("UI_FONT", 10, "bold"),  
+                    tk.Button(btn_box, text="查看海洋參數", bg="#28a745", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
                             command=lambda: self.go(mode="full")).pack(side="left", padx=5)
-                    tk.Button(btn_box, text="查看統計", bg="#17a2b8", fg="#FFFFFF", font=("UI_FONT", 10, "bold"),  
+                    tk.Button(btn_box, text="查看統計", bg="#17a2b8", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
                             command=self.show_stats).pack(side="left", padx=5)
 
                 def on_yr(self, e):
@@ -1661,12 +1740,12 @@ if __name__ == "__main__":
                     top.geometry("500x600") # 稍微加大一點
                     
                     # [設定] AI 使用 Courier New 讓數字對齊，但好醜，還是改掉好了。
-                    txt = tk.Text(top, font=("UI_FONT", 12), padx=15, pady=15)
+                    txt = tk.Text(top, font=(UI_FONT, 12), padx=15, pady=15)
                     txt.pack(fill="both", expand=True)
 
                     # [設定] 定義標題的樣式 (藍色、粗體、UI_FONT)
                     # 這裡示範：雖然內文用 Courier New，但標題我想用UI_FONT
-                    txt.tag_config("header", foreground="blue", font=("UI_FONT", 12, "bold"), spacing1=10)
+                    txt.tag_config("header", foreground="blue", font=(UI_FONT, 12, "bold"), spacing1=10)
                     txt.tag_config("norm", foreground="black")
 
                     # 2. 計算並寫入

@@ -23,8 +23,8 @@ from collections import defaultdict
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, State, no_update
-# from dash import no_update
+from dash import Dash, dcc, html, Input, Output, State, no_update, Patch, ctx
+from dash.exceptions import PreventUpdate
 import dash_bridge
 from build_water_figure import build_water_figure
 
@@ -299,8 +299,16 @@ def make_demo_figure() -> go.Figure:
 # § 4  Dash App 初始化
 # ══════════════════════════════════════════════════════════════════════════════
 
+# app = Dash(
+#     __name__,
+#     title="海洋動力診斷儀表板",
+#     suppress_callback_exceptions=True,
+# )
+
+# 明確指定路徑名稱修正：在建立 app 時明確指定 assets_folder
 app = Dash(
     __name__,
+    assets_folder=os.path.join(os.path.dirname(__file__), "assets"),
     title="海洋動力診斷儀表板",
     suppress_callback_exceptions=True,
 )
@@ -308,15 +316,17 @@ app = Dash(
 # ── 共用樣式常數 ─────────────────────────────────────────────────────────────
 _CLR_NAVY   = "#1a3a5c"
 _CLR_PANEL  = "#f0f4f8"
-_CLR_BORDER = "#c8d6e5"
-_FONT_MONO  = "Courier New, Consolas, monospace"
-_FONT_UI    = "Noto Sans TC, Segoe UI, Arial, sans-serif"
+# _CLR_BORDER = "#c8d6e5"
+_CLR_BORDER = "rgba(200, 214, 229, 0.25)" # 半透明邊框，與 Dash 深色底更協調
+# _FONT_MONO  = "Courier New, Consolas, monospace"
+# _FONT_UI    = "Noto Sans TC, Segoe UI, Arial, sans-serif"
+_FONT_MONO  = "標楷體, Courier New, Consolas, monospace" # 將標楷體加入等寬字體列表
+_FONT_UI    = "標楷體, Noto Sans TC, Segoe UI, Arial, sans-serif" # 將標楷體加入 Dash UI 字體列表
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # § 5  Layout
 # ══════════════════════════════════════════════════════════════════════════════
-
 app.layout = html.Div(
     style={
         "fontFamily": _FONT_UI,
@@ -416,6 +426,76 @@ app.layout = html.Div(
                     },
                     children=[
 
+                        # §0  水位 Y 軸範圍設定
+                        html.Div(
+                            style={
+                                "backgroundColor": "#1e2a3a",
+                                "border": f"1px solid {_CLR_BORDER}",
+                                "borderRadius": "8px",
+                                "padding": "14px 16px",
+                            },
+                            children=[
+                                html.H3(
+                                    "水位 Y 軸範圍",
+                                    style={
+                                        "margin": "0 0 10px",
+                                        "fontSize": "13px",
+                                        "color": "#7eb8f7",
+                                        "borderBottom": f"2px solid {_CLR_NAVY}",
+                                        "paddingBottom": "6px",
+                                    },
+                                ),
+                                html.Div(
+                                    style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "8px"},
+                                    children=[
+                                        html.Label("上限", style={"fontSize": "13px", "color": "#ccd", "whiteSpace": "nowrap"}),
+                                        dcc.Input(
+                                            id="yaxis-max", type="number", placeholder="自動",
+                                            debounce=True,
+                                            style={
+                                                "width": "80px", "fontSize": "13px",
+                                                "padding": "4px 8px",
+                                                "border": f"1px solid {_CLR_BORDER}",
+                                                "borderRadius": "4px",
+                                                "backgroundColor": "#111820",
+                                                "color": "#ccd",
+                                            },
+                                        ),
+                                        html.Label("下限", style={"fontSize": "13px", "color": "#ccd", "whiteSpace": "nowrap"}),
+                                        dcc.Input(
+                                            id="yaxis-min", type="number", placeholder="自動",
+                                            debounce=True,
+                                            style={
+                                                "width": "80px", "fontSize": "13px",
+                                                "padding": "4px 8px",
+                                                "border": f"1px solid {_CLR_BORDER}",
+                                                "borderRadius": "4px",
+                                                "backgroundColor": "#111820",
+                                                "color": "#ccd",
+                                            },
+                                        ),
+                                    ],
+                                ),
+                                html.Div(
+                                    style={"display": "flex", "gap": "8px", "marginBottom": "6px"},
+                                    children=[
+                                        html.Button("套用", id="yaxis-apply-btn", n_clicks=0,
+                                                    style={"flex": "1", "fontFamily": _FONT_UI, "fontSize": "13px", "padding": "4px 0",
+                                                        "backgroundColor": "#2a3f5f", "color": "#ccd",
+                                                        "border": f"1px solid {_CLR_BORDER}", "borderRadius": "4px",
+                                                        "cursor": "pointer"}),
+                                        html.Button("清除", id="yaxis-clear-btn", n_clicks=0,
+                                                    style={"flex": "1", "fontFamily": _FONT_UI, "fontSize": "13px", "padding": "4px 0",
+                                                        "backgroundColor": "#2a3f5f", "color": "#ccd",
+                                                        "border": f"1px solid {_CLR_BORDER}", "borderRadius": "4px",
+                                                        "cursor": "pointer"}),
+                                    ],
+                                ),
+                                html.Div(id="yaxis-status",
+                                        style={"fontSize": "11px", "color": "#888", "minHeight": "16px"}),
+                            ],
+                        ),
+                        
                         # §A  SQL 模式選擇
                         html.Div(
                             style={
@@ -532,8 +612,8 @@ app.layout = html.Div(
                                         "fontSize": "13px",
                                         # "color": _CLR_NAVY,
                                         "color": "#7eb8f7",
-                                        # "borderBottom": f"2px solid {_CLR_NAVY}",
-                                        "borderBottom": "2px solid #7eb8f7",
+                                        "borderBottom": f"2px solid {_CLR_NAVY}",
+                                        # "borderBottom": "2px solid #7eb8f7",
                                         "paddingBottom": "6px",
                                     },
                                 ),
@@ -545,7 +625,7 @@ app.layout = html.Div(
                                     },
                                     children=[
                                         html.Label("MIN 欄位",
-                                                   style={"fontSize": "13px"}),
+                                                   style={"fontSize": "13px", "whiteSpace": "nowrap", "color": "#ccd"}),
                                         dcc.Dropdown(
                                             id="qc-operator",
                                             options=[
@@ -556,7 +636,12 @@ app.layout = html.Div(
                                             ],
                                             value="+",
                                             clearable=False,
-                                            style={"width": "90px", "fontSize": "13px"},
+                                            style={
+                                                "width": "90px", 
+                                                "fontSize": "13px",
+                                                "border": f"1px solid {_CLR_BORDER}",
+                                                "borderRadius": "4px"
+                                            },
                                         ),
                                         dcc.Input(
                                             id="qc-operand",
@@ -790,6 +875,153 @@ def render_water_figure(key):
     # print(f"[render] land_range={lr}")          # ← 加這行
     return build_water_figure(bundles, land_range=lr)   # ← 改這行
 
+
+# -------貼在現有 callbacks 區塊末尾，不影響任何既有邏輯：--------
+# # 第二版clientside_callback
+# app.clientside_callback(
+#     """
+#     function(n_apply, n_clear, y_max, y_min) {
+#         const ctx = dash_clientside.callback_context;
+#         if (!ctx || !ctx.triggered.length) return window.dash_clientside.no_update;
+
+#         const triggered_id = ctx.triggered[0].prop_id.split('.')[0];
+#         const graphDiv = document.getElementById('main-graph');
+#         if (!graphDiv || !graphDiv._fullLayout) return window.dash_clientside.no_update;
+
+#         const leftAxes = Object.keys(graphDiv._fullLayout).filter(k =>
+#             k === 'yaxis' ||
+#             (k.startsWith('yaxis') && /^[0-9]+$/.test(k.slice(5)) && parseInt(k.slice(5)) % 2 === 1)
+#         );
+
+#         const update = {};
+
+#         if (triggered_id === 'yaxis-clear-btn') {
+#             leftAxes.forEach(k => {
+#                 update[k + '.autorange'] = true;
+#                 update[k + '.range']     = null;
+#             });
+#             Plotly.relayout(graphDiv, update);
+#             return '✓ 已重設為自動範圍';
+#         }
+
+#         if (y_max === null && y_min === null) return '⚠ 請至少輸入一個值';
+#         if (y_max !== null && y_min !== null && y_max <= y_min) return '⚠ 上限必須大於下限';
+
+#         leftAxes.forEach(k => {
+#             update[k + '.autorange'] = false;
+#             update[k + '.range']     = [y_min, y_max];
+#         });
+#         Plotly.relayout(graphDiv, update);
+
+#         const lo = y_min !== null ? y_min : 'auto';
+#         const hi = y_max !== null ? y_max : 'auto';
+#         return '✓ 已套用至 ' + leftAxes.length + ' 個子圖　[' + lo + ', ' + hi + ']';
+#     }
+#     """,
+#     Output("yaxis-status", "children"),
+#     Input("yaxis-apply-btn",  "n_clicks"),
+#     Input("yaxis-clear-btn",  "n_clicks"),
+#     State("yaxis-max", "value"),
+#     State("yaxis-min", "value"),
+#     prevent_initial_call=True,
+# )
+
+# # 把整個 apply_yaxis_range callback 函式完整刪除（包含 @app.callback 裝飾器）。
+# app.clientside_callback(
+#     """
+#     function(n_apply, n_clear, y_max, y_min) {
+#         const ctx = dash_clientside.callback_context;
+#         if (!ctx || !ctx.triggered.length) return window.dash_clientside.no_update;
+
+#         const triggered_id = ctx.triggered[0].prop_id.split('.')[0];
+#         const graphDiv = document.getElementById('main-graph');
+
+#         // 圖表尚未渲染完成時略過
+#         if (!graphDiv || !graphDiv._fullLayout) return window.dash_clientside.no_update;
+
+#         // 找出所有左側 Y 軸 key（水位軸，奇數編號）
+#         const leftAxes = Object.keys(graphDiv._fullLayout).filter(k =>
+#             k === 'yaxis' ||
+#             (k.startsWith('yaxis') && /^[0-9]+$/.test(k.slice(5)) && parseInt(k.slice(5)) % 2 === 1)
+#         );
+
+#         const update = {};
+
+#         if (triggered_id === 'yaxis-clear-btn') {
+#             leftAxes.forEach(k => {
+#                 update[k + '.autorange'] = true;
+#                 update[k + '.range']     = null;
+#             });
+#             Plotly.relayout(graphDiv, update);
+#             return '✓ 已重設為自動範圍';
+#         }
+
+#         // 套用分支
+#         if (y_max === null && y_min === null) return '⚠ 請至少輸入一個值';
+#         if (y_max !== null && y_min !== null && y_max <= y_min) return '⚠ 上限必須大於下限';
+
+#         leftAxes.forEach(k => {
+#             update[k + '.autorange'] = false;
+#             update[k + '.range']     = [y_min, y_max];
+#         });
+#         Plotly.relayout(graphDiv, update);
+
+#         const lo = y_min !== null ? y_min : 'auto';
+#         const hi = y_max !== null ? y_max : 'auto';
+#         return `✓ 已套用至 ${leftAxes.length} 個子圖　[${lo}, ${hi}]`;
+#     }
+#     """,
+#     Output("yaxis-status", "children"),
+#     Input("yaxis-apply-btn",  "n_clicks"),
+#     Input("yaxis-clear-btn",  "n_clicks"),
+#     State("yaxis-max", "value"),
+#     State("yaxis-min", "value"),
+#     prevent_initial_call=True,
+# )
+
+@app.callback(
+    Output("main-graph", "figure"),
+    Output("yaxis-status", "children"),
+    Input("yaxis-apply-btn", "n_clicks"),
+    Input("yaxis-clear-btn", "n_clicks"),     # 新增
+    State("yaxis-max", "value"),
+    State("yaxis-min", "value"),
+    State("main-graph", "figure"),
+    prevent_initial_call=True,
+)
+def apply_yaxis_range(n_apply, n_clear, y_max, y_min, current_fig):
+    if current_fig is None:
+        raise Dash.exceptions.PreventUpdate
+
+    layout = current_fig.get("layout", {})
+    left_yaxis_keys = [
+        k for k in layout
+        if k == "yaxis" or (k.startswith("yaxis") and k[5:].isdigit() and int(k[5:]) % 2 == 1)
+    ]
+
+    patched = Patch()
+
+    # ── 清除分支 ──────────────────────────────────────────
+    if ctx.triggered_id == "yaxis-clear-btn":
+        for key in left_yaxis_keys:
+            patched["layout"][key]["autorange"] = True
+            patched["layout"][key]["range"] = None
+        return patched, "✓ 已重設為自動範圍"
+
+    # ── 套用分支 ──────────────────────────────────────────
+    if y_max is None and y_min is None:
+        return no_update, "⚠ 請至少輸入一個值"
+    if y_max is not None and y_min is not None and y_max <= y_min:
+        return no_update, "⚠ 上限必須大於下限"
+
+    for key in left_yaxis_keys:
+        patched["layout"][key]["autorange"] = False
+        patched["layout"][key]["range"] = [y_min, y_max]   # None 的一側 Plotly 會自動處理
+
+    n_rows = len(left_yaxis_keys)
+    lo_str = str(y_min) if y_min is not None else "auto"
+    hi_str = str(y_max) if y_max is not None else "auto"
+    return patched, f"✓ 已套用至 {n_rows} 個子圖　[{lo_str}, {hi_str}]"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # § 7  Entry Point
