@@ -502,13 +502,22 @@ class OceanDataEngine:
             if p_data.empty:
                 df_p = pd.DataFrame()
                 if kind in ['1', '2', '3']: # 氣象站 -> meteo
-                    df_p = pd.read_sql(f"SELECT DATATIME as Time, (p*0.1) as P FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        df_p = pd.read_sql(f"SELECT DATATIME as Time, (p*0.1) as P FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        df_p = pd.DataFrame()
                 elif kind == '8': # 浮標 -> pres1
-                    df_p = self.expand_data(pd.read_sql(f"SELECT * FROM pres1 WHERE STID='{cid}' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn), 'P', '1h')
-                    if not df_p.empty: df_p['P'] *= 0.1
+                    try:
+                        df_p = self.expand_data(pd.read_sql(f"SELECT * FROM pres1 WHERE STID='{cid}' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn), 'P', '1h')
+                        if not df_p.empty: df_p['P'] *= 0.1
+                    except Exception:
+                        df_p = pd.DataFrame()
                 elif kind == '6': # 潮位站 -> pres6
-                    df_p = self.expand_data(pd.read_sql(f"SELECT * FROM pres6 WHERE STID='{cid}' AND DATATIME BETWEEN '{s_s}' AND '{e_s}' AND QC = 'Q'", self.conn), 'P', '1h')
-                    if not df_p.empty: df_p['P'] *= 0.1
+                    try:
+                        df_p = self.expand_data(pd.read_sql(f"SELECT * FROM pres6 WHERE STID='{cid}' AND DATATIME BETWEEN '{s_s}' AND '{e_s}' AND QC = 'Q'", self.conn), 'P', '1h')
+                        if not df_p.empty: df_p['P'] *= 0.1
+                    except Exception:
+                        df_p = pd.DataFrame()
                 
                 # 如果查到了，就存起來，並標記來源
                 if not df_p.empty:
@@ -519,11 +528,17 @@ class OceanDataEngine:
             if w_data.empty:
                 df_w = pd.DataFrame()
                 if kind in ['1', '2', '3']: # 氣象站 -> meteo
-                    df_w = pd.read_sql(f"SELECT DATATIME as Time, (ws*0.1) as WS, wd as WD FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        df_w = pd.read_sql(f"SELECT DATATIME as Time, (ws*0.1) as WS, wd as WD FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        df_w = pd.DataFrame()
                 elif kind in ['6', '8']: # 潮位站/浮標 -> wind
                     # 決定 Z 值: 潮位站 Z=6, 浮標 Z=2 或 3
                     z_condition = "Z='6'" if kind == '6' else "Z IN ('2', '3')"
-                    raw_w = pd.read_sql(f"SELECT TIME as Time, (VM*0.1) as WS, DM as WD, Z, qc as QC FROM wind WHERE STID='{cid}' AND {z_condition} AND TIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        raw_w = pd.read_sql(f"SELECT TIME as Time, (VM*0.1) as WS, DM as WD, Z, qc as QC FROM wind WHERE STID='{cid}' AND {z_condition} AND TIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        raw_w = pd.DataFrame()
                     if not raw_w.empty:
                         raw_w['Time'] = pd.to_datetime(raw_w['Time']).dt.floor('min')
                         # 浮標若有多個風速計，優先取 Z 小的 (Z=2)
@@ -546,10 +561,16 @@ class OceanDataEngine:
             if at_data.empty:
                 df_at = pd.DataFrame()
                 if kind in ['1', '2', '3']: # 氣象站 -> meteo
-                    df_at = pd.read_sql(f"SELECT DATATIME as Time, (t*0.1) as AT FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        df_at = pd.read_sql(f"SELECT DATATIME as Time, (t*0.1) as AT FROM meteo WHERE stid='{cid}' AND min=0 AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        df_at = pd.DataFrame()
                 elif kind in ['6', '8']: # 潮位站/浮標 -> stemp6 / stemp1 (Z=-3)
                     table = 'stemp6' if kind == '6' else 'stemp1'
-                    raw_at = pd.read_sql(f"SELECT * FROM {table} WHERE STID='{cid}' AND Z='-3' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        raw_at = pd.read_sql(f"SELECT * FROM {table} WHERE STID='{cid}' AND Z='-3' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        raw_at = pd.DataFrame()
                     if not raw_at.empty:
                         raw_at.columns = [c.upper() for c in raw_at.columns]
                     if kind == '6' and not raw_at.empty and 'QC' in raw_at.columns:
@@ -578,11 +599,17 @@ class OceanDataEngine:
             if wt_data.empty:
                 df_wt = pd.DataFrame()
                 if kind == '8': # 浮標 -> stemp1 (Z=0)
-                    raw_wt = pd.read_sql(f"SELECT * FROM stemp1 WHERE STID='{cid}' AND Z='0' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        raw_wt = pd.read_sql(f"SELECT * FROM stemp1 WHERE STID='{cid}' AND Z='0' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        raw_wt = pd.DataFrame()
                     df_wt = self.expand_data(raw_wt, 'WT', '1h')
                     if not df_wt.empty: df_wt['WT'] *= 0.1
                 elif kind == '6': # 潮位站 -> stemp6 (Z=0)
-                    raw_wt = pd.read_sql(f"SELECT * FROM stemp6 WHERE STID='{cid}' AND Z='0' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    try:
+                        raw_wt = pd.read_sql(f"SELECT * FROM stemp6 WHERE STID='{cid}' AND Z='0' AND DATATIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+                    except Exception:
+                        raw_wt = pd.DataFrame()
                     if not raw_wt.empty:
                         raw_wt.columns = [c.upper() for c in raw_wt.columns]
                     if not raw_wt.empty and 'QC' in raw_wt.columns:
@@ -645,7 +672,10 @@ class OceanDataEngine:
                 WHERE STID='{b_id}' 
                 AND YEAR IN ({start.year}, {end.year}) 
             """
-            df_wv_raw = pd.read_sql(query, self.conn)
+            try:
+                df_wv_raw = pd.read_sql(query, self.conn)
+            except Exception:
+                df_wv_raw = pd.DataFrame()
 
             if not df_wv_raw.empty:
                 # 組合時間欄位
@@ -663,7 +693,10 @@ class OceanDataEngine:
                 wv_data = wv_data[(wv_data['Time'] >= pd.to_datetime(s_s)) & (wv_data['Time'] <= pd.to_datetime(e_s))]
 
             # B. 海流 (Current)
-            cu_df = pd.read_sql(f"SELECT TIME as Time, (V*0.1) as V, D as DIR FROM curr WHERE STID='{b_id}' AND Z='4' AND TIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+            try:
+                cu_df = pd.read_sql(f"SELECT TIME as Time, (V*0.1) as V, D as DIR FROM curr WHERE STID='{b_id}' AND Z='4' AND TIME BETWEEN '{s_s}' AND '{e_s}'", self.conn)
+            except Exception:
+                cu_df = pd.DataFrame()
             if not cu_df.empty:
                 cu_df['Time'] = pd.to_datetime(cu_df['Time']).dt.floor('min')
                 cu_data = cu_df[['Time', 'V', 'DIR']]
@@ -1531,6 +1564,10 @@ if __name__ == "__main__":
                         self.lb.insert(tk.END, f"{i+1:2d}. [{sid:<6}] {stn} ({cty})({agy})")
 
                 def build_ui(self):
+                    # 取得當前日期與當月 1 日作為預設值
+                    today = datetime.date.today()
+                    first_day = today.replace(day=1)
+
                     # 原本的白色底設定（有點懶得改，先不動）
                     tk.Label(self.root, text=f"連線伺服器: {self.e.host} | 帳號: {self.e.user}", fg="#666", font=(UI_FONT, 10)).pack(pady=5)
                     
@@ -1550,12 +1587,16 @@ if __name__ == "__main__":
                     f_sd.pack(pady=5) # 這一行的垂直間距
                     tk.Label(f_sd, text="起始時間:", font=(UI_FONT)).pack(side="left")
                     self.sd = DateEntry(f_sd, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT))
+                    self.sd = DateEntry(f_sd, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT),
+                                        year=first_day.year, month=first_day.month, day=first_day.day)
                     self.sd.pack(side="left", padx=5) # padx 讓文字跟輸入框有點距離
                     # 2. 結束時間行
                     f_ed = tk.Frame(self.root)
                     f_ed.pack(pady=5)
                     tk.Label(f_ed, text="結束時間:", font=(UI_FONT)).pack(side="left")
                     self.ed = DateEntry(f_ed, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT))
+                    self.ed = DateEntry(f_ed, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT),
+                                        year=today.year, month=today.month, day=today.day)
                     self.ed.pack(side="left", padx=5)
 
                     tk.Label(self.root, text="海洋參數模式下，建議查詢範圍不超過 45 天，每次建議選取 12 站以內。", fg="red", font=(UI_FONT, 10)).pack(pady=(0, 5))
@@ -1613,23 +1654,25 @@ if __name__ == "__main__":
                     self.lb.pack(fill="both", expand=True, padx=20)
                     # tk.Button(self.root, text="生成診斷報表", bg="#28a745", fg="#FFFFFF", font=("UI_FONT", 10, "bold"), command=self.go).pack(pady=10) #字體本來是Arial
 
-                    # ── QC 操作設定框 ──────────────────────────────
-                    f_qc = tk.LabelFrame(self.root, text="框選操作設定", font=(UI_FONT), padx=8, pady=5)
-                    f_qc.pack(fill="x", padx=20, pady=(0, 5))
+                    # MODE 操作設定在 DASH 面板上整合了，所以這邊已不需要
+                    # ── QC 操作設定框開始 ────────────────────────────
+                    # f_qc = tk.LabelFrame(self.root, text="框選操作設定", font=(UI_FONT), padx=8, pady=5)
+                    # f_qc.pack(fill="x", padx=20, pady=(0, 5))
 
-                    # Mode 選擇
-                    tk.Radiobutton(f_qc, text="Mode 1：更新 QC 值", font=(UI_FONT),
-                                variable=self._qc_mode, value="1").grid(row=0, column=0, sticky="w")
-                    tk.Spinbox(f_qc, textvariable=self._new_qc, from_=0, to=9,
-                            width=4, font=(UI_FONT)).grid(row=0, column=1, sticky="w", padx=(4, 0))
+                    # # Mode 選擇
+                    # tk.Radiobutton(f_qc, text="Mode 1：更新 QC 值", font=(UI_FONT),
+                    #             variable=self._qc_mode, value="1").grid(row=0, column=0, sticky="w")
+                    # tk.Spinbox(f_qc, textvariable=self._new_qc, from_=0, to=9,
+                    #         width=4, font=(UI_FONT)).grid(row=0, column=1, sticky="w", padx=(4, 0))
 
-                    tk.Radiobutton(f_qc, text="Mode 2：MIN 四則運算", font=(UI_FONT),
-                                variable=self._qc_mode, value="2").grid(row=1, column=0, sticky="w")
-                    ttk.Combobox(f_qc, textvariable=self._op,
-                                values=["+", "-", "*", "/"], width=3,
-                                state="readonly").grid(row=1, column=1, sticky="w", padx=(4, 0))
-                    tk.Entry(f_qc, textvariable=self._operand,
-                            width=8).grid(row=1, column=2, sticky="w", padx=(4, 0))
+                    # tk.Radiobutton(f_qc, text="Mode 2：MIN 四則運算", font=(UI_FONT),
+                    #             variable=self._qc_mode, value="2").grid(row=1, column=0, sticky="w")
+                    # ttk.Combobox(f_qc, textvariable=self._op,
+                    #             values=["+", "-", "*", "/"], width=3,
+                    #             state="readonly").grid(row=1, column=1, sticky="w", padx=(4, 0))
+                    # tk.Entry(f_qc, textvariable=self._operand,
+                    #         width=8).grid(row=1, column=2, sticky="w", padx=(4, 0))
+                    # ── QC 操作設定框結束 ────────────────────────────
 
                     # === 執行按鈕區 (改用 Frame 包起來放兩顆) ===
                     btn_box = tk.Frame(self.root)

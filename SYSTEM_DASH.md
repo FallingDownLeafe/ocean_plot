@@ -391,7 +391,7 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 
   ---
 
-## 7. 系統微調與更新紀錄 (2026-05)
+## 7. 系統微調與更新紀錄 (2026-05-12)
 
   本章節紀錄 2026 年 5 月期間針對系統穩定性、視覺體驗及操作效率所做的微調優化。
 
@@ -411,7 +411,88 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 
 ---
 
-## 8. 已知限制與待辦事項
+## 8. VdC 散佈圖模組（2026-05-25）
+
+### 新增檔案：`build_vdc_figure.py`
+
+**職責：** 純函式繪圖模組，輸入 bundles 產出 Van de Casteele 散佈圖的 `go.Figure`。
+
+**函式簽名：**
+```python
+build_vdc_figure(
+    bundles: list,
+    diff_type: str = "auto",   # "auto" | "雷達式" | "壓力式"
+    zoom_range: dict | None = None  # {"x_start": str, "x_end": str}
+) -> tuple[go.Figure, dict]
+```
+
+**副儀器選擇邏輯（diff_type）：**
+- `"auto"`：優先雷達式（type=4），無雷達則用壓力式（type=3）
+- `"雷達式"` / `"壓力式"`：強制指定，找不到時子圖顯示提示訊息
+
+**X 軸範圍：各站獨立，mean ± 3σ**
+每站以自身差值序列計算 `x_half = max(|mean| + 3×std, 1.0)`，套用於該子圖。
+使用者可透過 UI 手動覆蓋為統一對稱範圍（見 C 方案 callback）。
+
+**回歸線：**
+使用 `scipy.stats.linregress(WL, diff)` 計算，在 VdC 圖上疊加淡藍色虛線。
+斜率（a）與 R² 同步存入 `stats_summary` 並顯示於右側面板。
+
+**回傳 stats_summary 結構：**
+```python
+{
+  stid: {
+    "status": "success" | "no_data" | "no_fields" | "empty_data",
+    "count": int,
+    "mean": float,   # mm
+    "std": float,    # mm
+    "min": float,
+    "max": float,
+    "slope": float | None,   # 回歸斜率（mm/mm，無因次）
+    "r2": float | None,      # 決定係數
+  }
+}
+```
+
+**時間篩選（zoom 聯動）：**
+`zoom_range` 不為 None 時，各站 `sub_df` 在 `dropna()` 後以
+`t0 ≤ Time ≤ t1` 過濾，實現水位時序圖 zoom → VdC 自動重繪。
+
+---
+
+### dash_app.py 新增元件與 Callbacks
+
+**新增 Store：**
+- `dcc.Store(id="zoom-range-store", data=None)`：記錄水位圖目前的 zoom x 範圍
+
+**新增 Callbacks：**
+
+| Callback | 觸發 | 作用 |
+|----------|------|------|
+| `capture_zoom` | `main-graph.relayoutData` | 水位 tab 的 zoom/autorange 事件 → 更新 `zoom-range-store` |
+| `apply_vdc_x_range` | `vdc-x-apply-btn` / `vdc-x-clear-btn` | Patch 所有 VdC 子圖 xaxis 為統一對稱範圍或還原自動 |
+
+**`render_figure` 新增 Input：**
+`zoom-range-store` 加為 Input，切換 tab 或 zoom 後自動重繪 VdC。
+
+**VdC Tab 新增 UI 元素：**
+- `dcc.RadioItems(id="vdc-diff-type")`：副儀器類型選擇
+- `dcc.Input(id="vdc-x-range")`：X 軸對稱範圍 ±N mm
+- `html.Button` × 2：`vdc-x-apply-btn` / `vdc-x-clear-btn`
+- `html.Div(id="vdc-x-status")`：套用結果提示
+- `html.Div(id="vdc-stats-output")`：各站統計摘要（N / 平均差 / σ / 回歸斜率 / R²）
+
+---
+
+### 已知待辦
+
+| 優先度 | 項目 |
+|--------|------|
+| 🟢 低 | 匯出報表功能：點擊按鈕產生 VdC + 差值直方圖雙欄 PNG |
+
+---
+
+## 9. 已知限制與待辦事項
 
 ### 功能面
 
@@ -434,7 +515,7 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 
 ---
 
-## 9. 打包注意事項（PyInstaller）
+## 10. 打包注意事項（PyInstaller）
 
 ### mysql.connector 必須使用 `--collect-all`
 

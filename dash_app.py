@@ -27,6 +27,7 @@ from dash import Dash, dcc, html, Input, Output, State, no_update, Patch, ctx
 from dash.exceptions import PreventUpdate
 import dash_bridge
 from build_water_figure import build_water_figure
+from build_vdc_figure import build_vdc_figure
 
 # ── 環境設定 ──────────────────────────────────────────────────────────────────
 DASH_PORT = int(os.getenv("DASH_PORT", "8050"))
@@ -341,6 +342,7 @@ app.layout = html.Div(
         # stid-store：當前主測站代碼（Tkinter push_figure 時一併更新）
         dcc.Store(id="stid-store", data=None),
         dcc.Store(id="bundle-key-store", data=None),
+        dcc.Store(id="zoom-range-store", data=None),
         dcc.Interval(id="bundle-poll", interval=500, n_intervals=0),
 
         # ── 頂部 Header ───────────────────────────────────────────────────────
@@ -403,7 +405,8 @@ app.layout = html.Div(
                                 "toImageButtonOptions": {
                                     "format": "png",
                                     "scale": 2,
-                                    "filename": f"ocean_{_DEMO_STID}",
+                                    "filename": f"ocean_diagnostic",
+                                    # "filename": f"ocean_{_DEMO_STID}", #正式作業不適合帶 DEMO STID, 之後再設計動態更新邏輯，現在先採靜態檔名
                                 },
                             },
                             style={
@@ -437,7 +440,36 @@ app.layout = html.Div(
                         "flexDirection": "column",
                         "gap": "12px",
                     },
+                    # children=[
                     children=[
+                        dcc.Tabs(
+                            id="right-panel-tabs",
+                            value="tab-water",
+                            colors={
+                                "border": _CLR_BORDER,
+                                "primary": "#7eb8f7",
+                                "background": "#111820",
+                            },
+                            style={"marginBottom": "0"},
+                            children=[
+                                dcc.Tab(
+                                    label="水位時序與 QC",
+                                    value="tab-water",
+                                    style={
+                                        "backgroundColor": "#1e2a3a",
+                                        "color": "#ccd",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                    },
+                                    selected_style={
+                                        "backgroundColor": "#1a3a5c",
+                                        "color": "#7eb8f7",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                        "fontWeight": "bold",
+                                        "borderTop": "2px solid #7eb8f7",
+                                    },
+                                    children=[
 
                         # §0  水位 Y 軸範圍設定
                         html.Div(
@@ -489,6 +521,34 @@ app.layout = html.Div(
                                         ),
                                     ],
                                 ),
+                                # 改動 A：§0 Layout 新增差值軸輸入列
+                                # ── 差值軸（右側）對稱範圍 ────────────────────────────────────
+                                html.Div(
+                                    style={"display": "flex", "alignItems": "center",
+                                        "gap": "8px", "marginTop": "8px"},
+                                    children=[
+                                        html.Label("差值軸 ±",
+                                                style={"fontSize": "13px", "whiteSpace": "nowrap",
+                                                        "color": "#ccd"}),
+                                        dcc.Input(
+                                            id="yaxis-diff-range",
+                                            type="number",
+                                            placeholder="mm",
+                                            min=1, step=1,
+                                            style={
+                                                "width": "70px",
+                                                "border": f"1px solid {_CLR_BORDER}",
+                                                "borderRadius": "4px",
+                                                "padding": "4px 8px",
+                                                "fontSize": "13px",
+                                                "backgroundColor": "#111820",
+                                                "color": "#ccd",
+                                            },
+                                        ),
+                                        html.Span("mm（留空 = 自動）",
+                                                style={"fontSize": "11px", "color": "#888"}),
+                                    ],
+                                ),
                                 html.Div(
                                     style={"display": "flex", "gap": "8px", "marginBottom": "6px"},
                                     children=[
@@ -534,9 +594,9 @@ app.layout = html.Div(
                                     id="qc-mode",
                                     options=[
                                         {"label": " Mode 1　更新 QC 旗標",
-                                         "value": "1"},
+                                        "value": "1"},
                                         {"label": " Mode 2　MIN 欄位四則運算",
-                                         "value": "2"},
+                                        "value": "2"},
                                     ],
                                     value="1",
                                     inputStyle={"marginRight": "6px"},
@@ -638,7 +698,7 @@ app.layout = html.Div(
                                     },
                                     children=[
                                         html.Label("MIN 欄位",
-                                                   style={"fontSize": "13px", "whiteSpace": "nowrap", "color": "#ccd"}),
+                                                style={"fontSize": "13px", "whiteSpace": "nowrap", "color": "#ccd"}),
                                         dcc.Dropdown(
                                             id="qc-operator",
                                             options=[
@@ -676,7 +736,7 @@ app.layout = html.Div(
                                 html.P(
                                     "語意：被框到的各 MIN 欄位 = 原值  OP  數值",
                                     style={"margin": "8px 0 0",
-                                           "fontSize": "11px", "color": "#888"},
+                                        "fontSize": "11px", "color": "#888"},
                                 ),
                             ],
                         ),
@@ -717,8 +777,8 @@ app.layout = html.Div(
                                         html.Span(
                                             "UPDATE SQL",
                                             style={"fontSize": "13px",
-                                                   "color": "#7eb8f7",
-                                                   "fontWeight": 600},
+                                                "color": "#7eb8f7",
+                                                "fontWeight": 600},
                                         ),
                                         dcc.Clipboard(
                                             id="copy-btn",
@@ -760,6 +820,136 @@ app.layout = html.Div(
                             ],
                         ),
 
+                    # ],  # end QC 面板 children
+                    ],  # end Tab 1 children
+                                ),  # end Tab 1
+
+                                # ── Tab 2：VdC 散佈圖 ─────────────────────
+                                dcc.Tab(
+                                    label="VdC 散佈圖",
+                                    value="tab-vdc",
+                                    style={
+                                        "backgroundColor": "#1e2a3a",
+                                        "color": "#ccd",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                    },
+                                    selected_style={
+                                        "backgroundColor": "#1a3a5c",
+                                        "color": "#7eb8f7",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                        "fontWeight": "bold",
+                                        "borderTop": "2px solid #7eb8f7",
+                                    },
+                                    children=[
+                                        html.Div(
+                                            style={
+                                                "padding": "12px 0",
+                                                "display": "flex",
+                                                "flexDirection": "column",
+                                                "gap": "12px",
+                                            },
+                                            children=[
+                                                html.Div(
+                                                    style={
+                                                        "backgroundColor": "#1e2a3a",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                    },
+                                                    children=[
+                                                        html.H3(
+                                                            "副儀器對比類型",
+                                                            style={
+                                                                "margin": "0 0 10px",
+                                                                "fontSize": "13px",
+                                                                "color": "#7eb8f7",
+                                                                "borderBottom": f"2px solid {_CLR_NAVY}",
+                                                                "paddingBottom": "6px",
+                                                            },
+                                                        ),
+                                                        dcc.RadioItems(
+                                                            id="vdc-diff-type",
+                                                            options=[
+                                                                {"label": " 自動（有雷達式選雷達式，否則選壓力式）", "value": "auto"},
+                                                                {"label": " 強制雷達式", "value": "雷達式"},
+                                                                {"label": " 強制壓力式", "value": "壓力式"},
+                                                            ],
+                                                            value="auto",
+                                                            inputStyle={"marginRight": "6px"},
+                                                            labelStyle={
+                                                                "display": "block",
+                                                                "marginBottom": "8px",
+                                                                "fontSize": "13px",
+                                                                "color": "#ccd",
+                                                            },
+                                                        ),
+                                                        # dash_app.py — Layout（加在 VdC tab 的 RadioItems 區塊下方）
+                                                        html.Div(
+                                                            style={"backgroundColor": "#1e2a3a", "border": f"1px solid {_CLR_BORDER}",
+                                                                "borderRadius": "8px", "padding": "14px 16px"},
+                                                            children=[
+                                                                html.H3("X 軸範圍（所有站統一）",
+                                                                        style={"margin": "0 0 10px", "fontSize": "13px", "color": "#7eb8f7",
+                                                                            "borderBottom": f"2px solid {_CLR_NAVY}", "paddingBottom": "6px"}),
+                                                                html.Div(
+                                                                    style={"display": "flex", "alignItems": "center", "gap": "8px"},
+                                                                    children=[
+                                                                        html.Label("±", style={"fontSize": "13px", "color": "#ccd",
+                                                                                            "whiteSpace": "nowrap"}),
+                                                                        dcc.Input(
+                                                                            id="vdc-x-range", type="number", placeholder="mm",
+                                                                            min=1, step=1,
+                                                                            style={"width": "70px", "border": f"1px solid {_CLR_BORDER}",
+                                                                                "borderRadius": "4px", "padding": "4px 8px",
+                                                                                "fontSize": "13px", "backgroundColor": "#111820",
+                                                                                "color": "#ccd"}),
+                                                                        html.Span("mm　留空 = 各站自動",
+                                                                                style={"fontSize": "11px", "color": "#888"}),
+                                                                    ],
+                                                                ),
+                                                                html.Div(
+                                                                    style={"display": "flex", "gap": "8px", "marginTop": "8px"},
+                                                                    children=[
+                                                                        html.Button("套用", id="vdc-x-apply-btn", n_clicks=0,
+                                                                                    style={"flex": "1", "fontFamily": _FONT_UI, "fontSize": "13px",
+                                                                                        "padding": "4px 0", "backgroundColor": "#1a3a5c",
+                                                                                        "color": "#7eb8f7", "border": f"1px solid {_CLR_BORDER}",
+                                                                                        "borderRadius": "4px", "cursor": "pointer"}),
+                                                                        html.Button("清除", id="vdc-x-clear-btn", n_clicks=0,
+                                                                                    style={"flex": "1", "fontFamily": _FONT_UI, "fontSize": "13px",
+                                                                                        "padding": "4px 0", "backgroundColor": "#2a3f5f",
+                                                                                        "color": "#ccd", "border": f"1px solid {_CLR_BORDER}",
+                                                                                        "borderRadius": "4px", "cursor": "pointer"}),
+                                                                    ],
+                                                                ),
+                                                                html.Div(id="vdc-x-status",
+                                                                        style={"fontSize": "11px", "color": "#888", "minHeight": "16px"}),
+                                                            ],
+                                                        ),
+                                                    ],
+                                                ),
+                                                html.Div(
+                                                    id="vdc-stats-output",
+                                                    style={
+                                                        "backgroundColor": "#111820",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                        "fontSize": "12px",
+                                                        "color": "#ccd",
+                                                        "minHeight": "80px",
+                                                        "lineHeight": "1.8",
+                                                    },
+                                                    children="切換至此頁籤並載入資料後，統計資訊將顯示於此。",
+                                                ),
+                                            ],
+                                        ),
+                                    ],
+                                ),  # end Tab 2
+                            ],  # end dcc.Tabs children
+                        ),  # end dcc.Tabs
                     ],  # end QC 面板 children
                 ),
 
@@ -876,178 +1066,243 @@ def poll_bundle(n_intervals, current_key):
         
     return no_update
 
-
 @app.callback(
     Output("main-graph", "figure"),
     Output("stid-store", "data"),
+    Output("vdc-stats-output", "children"),
     Input("bundle-key-store", "data"),
+    Input("right-panel-tabs", "value"),
+    Input("vdc-diff-type", "value"),
+    Input("zoom-range-store", "data"),   # ← 新增
 )
-def render_water_figure(key):
+def render_figure(key, active_tab, diff_type, zoom_range):
     if not key:
-        return no_update, no_update
-        
-    # 處理開發模式下的 Demo 展示
+        return no_update, no_update, no_update
+
     if key == "demo":
-        return make_demo_figure(), _DEMO_STID
+        return make_demo_figure(), _DEMO_STID, no_update
 
     bundle = dash_bridge.get_bundle(key)
     if bundle is None:
-        return no_update, no_update
-        
-    bundles = bundle if isinstance(bundle, list) else [bundle] #強制把格式改成list傳遞給build_water_figure，以免單一值時格式為bundle（dict）報錯。因為該函式設計只接受list
-    # 從資料中動態取得 STID 並更新 Store，確保 SQL 產生器抓到正確的測站
+        return no_update, no_update, no_update
+
+    bundles = bundle if isinstance(bundle, list) else [bundle]
     primary_stid = bundles[0].get("stid", _DEMO_STID) if bundles else _DEMO_STID
-    
-    lr = dash_bridge.get_land_range()          # ← 加這行
-    return build_water_figure(bundles, land_range=lr), primary_stid
 
+    if active_tab == "tab-vdc":
+        try:
+        # zoom_range 作為 Input（而非 State）的好處是：使用者在水位圖 zoom 後，若已在 VdC tab，圖會立即自動更新，不需要手動觸發。
+        # 修正：必須將 zoom_range 作為參數傳入函式
+            fig, stats_summary = build_vdc_figure(
+                bundles, diff_type or "auto", 
+                zoom_range=zoom_range # ← 傳入
+            )
+            stats_children = []
+            for stid_key, stats in stats_summary.items():
+                if stats.get("status") == "success":
+                    # 提取 build_vdc_figure 算好的回歸數值
+                    slope_val = stats.get("slope")
+                    r2_val    = stats.get("r2")
+                    stats_children.append(html.Div([
+                        html.Strong(f"測站 {stid_key}", style={"color": "#7eb8f7"}),
+                        html.Br(),
+                        f"資料期間：{stats['time_start']} ～ {stats['time_end']}",
+                        html.Br(),
+                        f"N={stats['count']}　平均差={stats['mean']:.1f} mm　σ={stats['std']:.1f} mm",
+                        html.Br(),
+                        f"回歸斜率={slope_val:.4f}　R²={r2_val:.3f}" if slope_val is not None else "",
+                    ], style={"marginBottom": "8px"}))
+                else:
+                    stats_children.append(html.Div(
+                        f"測站 {stid_key}：{stats.get('status', '未知')}",
+                        style={"color": "#d9534f", "marginBottom": "8px"}
+                    ))
+            return fig, primary_stid, stats_children or "無統計資料。"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()   # 印到 server 終端機
+            print(f"[VdC ERROR] {e}")
+            return no_update, no_update, f"錯誤：{e}"
+    else:
+        lr = dash_bridge.get_land_range()
+        return build_water_figure(bundles, land_range=lr), primary_stid, no_update
 
-# -------貼在現有 callbacks 區塊末尾，不影響任何既有邏輯：--------
-# # 第二版clientside_callback
-# app.clientside_callback(
-#     """
-#     function(n_apply, n_clear, y_max, y_min) {
-#         const ctx = dash_clientside.callback_context;
-#         if (!ctx || !ctx.triggered.length) return window.dash_clientside.no_update;
-
-#         const triggered_id = ctx.triggered[0].prop_id.split('.')[0];
-#         const graphDiv = document.getElementById('main-graph');
-#         if (!graphDiv || !graphDiv._fullLayout) return window.dash_clientside.no_update;
-
-#         const leftAxes = Object.keys(graphDiv._fullLayout).filter(k =>
-#             k === 'yaxis' ||
-#             (k.startsWith('yaxis') && /^[0-9]+$/.test(k.slice(5)) && parseInt(k.slice(5)) % 2 === 1)
-#         );
-
-#         const update = {};
-
-#         if (triggered_id === 'yaxis-clear-btn') {
-#             leftAxes.forEach(k => {
-#                 update[k + '.autorange'] = true;
-#                 update[k + '.range']     = null;
-#             });
-#             Plotly.relayout(graphDiv, update);
-#             return '✓ 已重設為自動範圍';
-#         }
-
-#         if (y_max === null && y_min === null) return '⚠ 請至少輸入一個值';
-#         if (y_max !== null && y_min !== null && y_max <= y_min) return '⚠ 上限必須大於下限';
-
-#         leftAxes.forEach(k => {
-#             update[k + '.autorange'] = false;
-#             update[k + '.range']     = [y_min, y_max];
-#         });
-#         Plotly.relayout(graphDiv, update);
-
-#         const lo = y_min !== null ? y_min : 'auto';
-#         const hi = y_max !== null ? y_max : 'auto';
-#         return '✓ 已套用至 ' + leftAxes.length + ' 個子圖　[' + lo + ', ' + hi + ']';
-#     }
-#     """,
+# @app.callback(
+#     Output("main-graph", "figure"),
 #     Output("yaxis-status", "children"),
-#     Input("yaxis-apply-btn",  "n_clicks"),
-#     Input("yaxis-clear-btn",  "n_clicks"),
+#     Input("yaxis-apply-btn", "n_clicks"),
+#     Input("yaxis-clear-btn", "n_clicks"),     # 新增
 #     State("yaxis-max", "value"),
 #     State("yaxis-min", "value"),
+#     State("main-graph", "figure"),
 #     prevent_initial_call=True,
 # )
+# def apply_yaxis_range(n_apply, n_clear, y_max, y_min, current_fig):
+#     if current_fig is None:
+#         raise Dash.exceptions.PreventUpdate
 
-# # 把整個 apply_yaxis_range callback 函式完整刪除（包含 @app.callback 裝飾器）。
-# app.clientside_callback(
-#     """
-#     function(n_apply, n_clear, y_max, y_min) {
-#         const ctx = dash_clientside.callback_context;
-#         if (!ctx || !ctx.triggered.length) return window.dash_clientside.no_update;
+#     layout = current_fig.get("layout", {})
+#     left_yaxis_keys = [
+#         k for k in layout
+#         if k == "yaxis" or (k.startswith("yaxis") and k[5:].isdigit() and int(k[5:]) % 2 == 1)
+#     ]
 
-#         const triggered_id = ctx.triggered[0].prop_id.split('.')[0];
-#         const graphDiv = document.getElementById('main-graph');
+#     patched = Patch()
 
-#         // 圖表尚未渲染完成時略過
-#         if (!graphDiv || !graphDiv._fullLayout) return window.dash_clientside.no_update;
+#     # ── 清除分支 ──────────────────────────────────────────
+#     if ctx.triggered_id == "yaxis-clear-btn":
+#         for key in left_yaxis_keys:
+#             patched["layout"][key]["autorange"] = True
+#             patched["layout"][key]["range"] = None
+#         return patched, "✓ 已重設為自動範圍"
 
-#         // 找出所有左側 Y 軸 key（水位軸，奇數編號）
-#         const leftAxes = Object.keys(graphDiv._fullLayout).filter(k =>
-#             k === 'yaxis' ||
-#             (k.startsWith('yaxis') && /^[0-9]+$/.test(k.slice(5)) && parseInt(k.slice(5)) % 2 === 1)
-#         );
+#     # ── 套用分支 ──────────────────────────────────────────
+#     if y_max is None and y_min is None:
+#         return no_update, "⚠ 請至少輸入一個值"
+#     if y_max is not None and y_min is not None and y_max <= y_min:
+#         return no_update, "⚠ 上限必須大於下限"
 
-#         const update = {};
+#     for key in left_yaxis_keys:
+#         patched["layout"][key]["autorange"] = False
+#         patched["layout"][key]["range"] = [y_min, y_max]   # None 的一側 Plotly 會自動處理
 
-#         if (triggered_id === 'yaxis-clear-btn') {
-#             leftAxes.forEach(k => {
-#                 update[k + '.autorange'] = true;
-#                 update[k + '.range']     = null;
-#             });
-#             Plotly.relayout(graphDiv, update);
-#             return '✓ 已重設為自動範圍';
-#         }
+#     n_rows = len(left_yaxis_keys)
+#     lo_str = str(y_min) if y_min is not None else "auto"
+#     hi_str = str(y_max) if y_max is not None else "auto"
+#     return patched, f"✓ 已套用至 {n_rows} 個子圖　[{lo_str}, {hi_str}]"
 
-#         // 套用分支
-#         if (y_max === null && y_min === null) return '⚠ 請至少輸入一個值';
-#         if (y_max !== null && y_min !== null && y_max <= y_min) return '⚠ 上限必須大於下限';
 
-#         leftAxes.forEach(k => {
-#             update[k + '.autorange'] = false;
-#             update[k + '.range']     = [y_min, y_max];
-#         });
-#         Plotly.relayout(graphDiv, update);
-
-#         const lo = y_min !== null ? y_min : 'auto';
-#         const hi = y_max !== null ? y_max : 'auto';
-#         return `✓ 已套用至 ${leftAxes.length} 個子圖　[${lo}, ${hi}]`;
-#     }
-#     """,
-#     Output("yaxis-status", "children"),
-#     Input("yaxis-apply-btn",  "n_clicks"),
-#     Input("yaxis-clear-btn",  "n_clicks"),
-#     State("yaxis-max", "value"),
-#     State("yaxis-min", "value"),
-#     prevent_initial_call=True,
-# )
-
+# 改動 B：apply_yaxis_range callback 完整替換
+# 把現有整個 apply_yaxis_range 函式（包含 @app.callback 裝飾器）替換為：
 @app.callback(
-    Output("main-graph", "figure"),
+    Output("main-graph", "figure", allow_duplicate=True), # ← 要有這個
     Output("yaxis-status", "children"),
     Input("yaxis-apply-btn", "n_clicks"),
-    Input("yaxis-clear-btn", "n_clicks"),     # 新增
-    State("yaxis-max", "value"),
-    State("yaxis-min", "value"),
-    State("main-graph", "figure"),
+    Input("yaxis-clear-btn", "n_clicks"),
+    State("yaxis-max",        "value"),
+    State("yaxis-min",        "value"),
+    State("yaxis-diff-range", "value"),   # ← 新增
+    State("main-graph",       "figure"),
     prevent_initial_call=True,
 )
-def apply_yaxis_range(n_apply, n_clear, y_max, y_min, current_fig):
+def apply_yaxis_range(n_apply, n_clear, y_max, y_min, diff_range, current_fig):
     if current_fig is None:
-        raise Dash.exceptions.PreventUpdate
+        raise PreventUpdate
 
     layout = current_fig.get("layout", {})
-    left_yaxis_keys = [
+
+    # 左側水位軸（奇數編號，含無編號的 yaxis）
+    left_keys = [
         k for k in layout
-        if k == "yaxis" or (k.startswith("yaxis") and k[5:].isdigit() and int(k[5:]) % 2 == 1)
+        if k == "yaxis"
+        or (k.startswith("yaxis") and k[5:].isdigit() and int(k[5:]) % 2 == 1)
+    ]
+    # 右側差值軸（偶數編號，yaxis2 / yaxis4 ...）
+    right_keys = [
+        k for k in layout
+        if k.startswith("yaxis") and k[5:].isdigit() and int(k[5:]) % 2 == 0
     ]
 
     patched = Patch()
 
-    # ── 清除分支 ──────────────────────────────────────────
+    # ── 清除分支 ──────────────────────────────────────────────────────────────
     if ctx.triggered_id == "yaxis-clear-btn":
-        for key in left_yaxis_keys:
+        for key in left_keys + right_keys:
             patched["layout"][key]["autorange"] = True
-            patched["layout"][key]["range"] = None
-        return patched, "✓ 已重設為自動範圍"
+            patched["layout"][key]["range"]     = None
+        return patched, "✓ 已重設所有軸為自動範圍"
 
-    # ── 套用分支 ──────────────────────────────────────────
+    # ── 套用分支 ──────────────────────────────────────────────────────────────
+    messages = []
+
+    # 左軸（水位）
     if y_max is None and y_min is None:
-        return no_update, "⚠ 請至少輸入一個值"
-    if y_max is not None and y_min is not None and y_max <= y_min:
-        return no_update, "⚠ 上限必須大於下限"
+        pass  # 未輸入則跳過左軸
+    elif y_max is not None and y_min is not None and y_max <= y_min:
+        return no_update, "⚠ 水位軸：上限必須大於下限"
+    else:
+        for key in left_keys:
+            patched["layout"][key]["autorange"] = False
+            patched["layout"][key]["range"]     = [y_min, y_max]
+        lo = str(y_min) if y_min is not None else "auto"
+        hi = str(y_max) if y_max is not None else "auto"
+        messages.append(f"水位軸 [{lo}, {hi}]（{len(left_keys)} 子圖）")
 
-    for key in left_yaxis_keys:
+    # 右軸（差值，對稱 ±N）
+    if diff_range is not None and diff_range > 0:
+        for key in right_keys:
+            patched["layout"][key]["autorange"] = False
+            patched["layout"][key]["range"]     = [-diff_range, diff_range]
+        messages.append(f"差值軸 ±{diff_range} mm（{len(right_keys)} 子圖）")
+
+    if not messages:
+        return no_update, "⚠ 請至少輸入一個範圍值"
+
+    return patched, "✓ 已套用：" + "　".join(messages)
+
+# dash_app.py — Callback（加在 apply_yaxis_range 後面）
+@app.callback(
+    Output("main-graph", "figure", allow_duplicate=True),
+    Output("vdc-x-status", "children"),
+    Input("vdc-x-apply-btn",  "n_clicks"),
+    Input("vdc-x-clear-btn",  "n_clicks"),
+    State("vdc-x-range",      "value"),
+    State("main-graph",       "figure"),
+    State("right-panel-tabs", "value"),
+    prevent_initial_call=True,
+)
+def apply_vdc_x_range(n_apply, n_clear, x_range, current_fig, active_tab):
+    if active_tab != "tab-vdc" or current_fig is None:
+        raise PreventUpdate
+
+    layout  = current_fig.get("layout", {})
+    x_keys  = [
+        k for k in layout
+        if k == "xaxis"
+        or (k.startswith("xaxis") and k[5:].isdigit())
+    ]
+    patched = Patch()
+
+    if ctx.triggered_id == "vdc-x-clear-btn":
+        for key in x_keys:
+            patched["layout"][key]["autorange"] = True
+            patched["layout"][key]["range"]     = None
+        return patched, "✓ 已重設為各站自動範圍"
+
+    if x_range is None or x_range <= 0:
+        return no_update, "⚠ 請輸入正數"
+
+    for key in x_keys:
         patched["layout"][key]["autorange"] = False
-        patched["layout"][key]["range"] = [y_min, y_max]   # None 的一側 Plotly 會自動處理
+        patched["layout"][key]["range"]     = [-x_range, x_range]
 
-    n_rows = len(left_yaxis_keys)
-    lo_str = str(y_min) if y_min is not None else "auto"
-    hi_str = str(y_max) if y_max is not None else "auto"
-    return patched, f"✓ 已套用至 {n_rows} 個子圖　[{lo_str}, {hi_str}]"
+    return patched, f"✓ 已套用 ±{x_range} mm（{len(x_keys)} 站）"
+
+# 監聽 main-graph.relayoutData，但只在水位 tab 時才記錄（VdC tab 的 zoom 不需要捕捉）：
+@app.callback(
+    Output("zoom-range-store", "data"),
+    Input("main-graph", "relayoutData"),
+    State("right-panel-tabs", "value"),
+    prevent_initial_call=True,
+)
+def capture_zoom(relayout_data, active_tab):
+    if active_tab == "tab-vdc" or not relayout_data:
+        raise PreventUpdate
+
+    # 使用者 double-click 或按 autoscale 重設縮放 → 清除記錄
+    if "xaxis.autorange" in relayout_data or "autosize" in relayout_data:
+        return None
+
+    # 修正：處理多子圖情況 (xaxis, xaxis2, xaxis3...)
+    # 遍歷可能的 axis key，只要抓到任何一個有範圍的就使用它
+    for i in range(1, 10):
+        prefix = "xaxis" if i == 1 else f"xaxis{i}"
+        if f"{prefix}.range[0]" in relayout_data:
+            x0 = relayout_data[f"{prefix}.range[0]"]
+            x1 = relayout_data[f"{prefix}.range[1]"]
+            return {"x_start": str(x0), "x_end": str(x1)}
+
+    raise PreventUpdate
 
 # ══════════════════════════════════════════════════════════════════════════════
 # § 7  Entry Point
