@@ -488,7 +488,53 @@ build_vdc_figure(
 
 | 優先度 | 項目 |
 |--------|------|
-| 🟢 低 | 匯出報表功能：點擊按鈕產生 VdC + 差值直方圖雙欄 PNG |
+| ✅ 完成 | 匯出報表功能：點擊按鈕產生 VdC + 差值直方圖雙欄 PNG |
+
+
+### 匯出 PNG 報表功能（2026-05）
+
+**觸發方式：** VdC tab 右側面板「📥 匯出 PNG 報表」按鈕
+
+**輸出內容：** n 列 × 2 欄靜態圖，每列對應一個測站：
+- 左欄：VdC 散佈圖（含回歸線，X 軸採各站獨立 mean ± 3σ 範圍）
+- 右欄：差值分佈直方圖（機率密度正規化）+ 常態曲線疊加 + 平均值標線
+
+**檔名格式：** `VdC_report_YYYYMMDD.png`
+
+**相依套件：** `kaleido`（Plotly 靜態圖片匯出後端）；建議版本 0.2.1，安裝指令：
+pip install kaleido==0.2.1
+
+**新增函式：`build_vdc_report_figure()`**
+
+位於 `build_vdc_figure.py`，獨立於 `build_vdc_figure()` 之外，不影響互動圖邏輯。
+
+```python
+build_vdc_report_figure(
+    bundles: list,
+    diff_type: str = "auto",
+    zoom_range: dict | None = None,
+) -> go.Figure
+```
+
+- 內部重跑主副儀器選取與 zoom 時間篩選，確保匯出圖與畫面所見一致
+- 使用 `go.Histogram(histnorm="probability density")` + `scipy.stats.norm.pdf` 疊加常態曲線
+- 輸出解析度：`scale=2`，寬 1400px，高 420px × 站數
+
+**新增元件（`dash_app.py`）：**
+
+| 元件 | ID | 說明 |
+|------|-----|------|
+| `html.Button` | `vdc-export-btn` | 觸發匯出 |
+| `dcc.Download` | `vdc-download` | 瀏覽器下載橋接（`dcc` 內建，無需額外 import）|
+
+**新增 Callback：`export_vdc_report`**
+
+| 項目 | 值 |
+|------|-----|
+| Output | `vdc-download.data` |
+| Input | `vdc-export-btn.n_clicks` |
+| State | `bundle-key-store`、`vdc-diff-type`、`zoom-range-store` |
+| 回傳 | `dcc.send_bytes(png_bytes, filename)` |
 
 ---
 

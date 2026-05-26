@@ -436,6 +436,187 @@ def build_vdc_figure(bundles: list, diff_type: str = "auto", zoom_range: dict | 
     
     return fig, stats_summary
 
+def build_vdc_report_figure(
+    bundles: list,
+    diff_type: str = "auto",
+    zoom_range: dict | None = None,
+) -> go.Figure:
+    """
+    匯出用雙欄報表圖：左欄 VdC 散佈圖，右欄差值分佈直方圖 + 常態曲線。
+    """
+    from scipy.stats import norm as _norm
+
+    n = len(bundles)
+    if n == 0:
+        return _make_empty_figure("無測站資料")
+
+    fig = make_subplots(
+        rows=n, cols=2,
+        column_widths=[0.6, 0.4],
+        vertical_spacing=0.08 if n > 1 else 0.05,
+        horizontal_spacing=0.08,
+        subplot_titles=[
+            title
+            for b in bundles
+            for title in (
+                f"{b['stname']}({b['stid']}) VdC 散佈圖",
+                f"{b['stname']}({b['stid']}) 差值分佈",
+            )
+        ],
+    )
+
+    for idx, b in enumerate(bundles):
+        row_idx = idx + 1
+        df        = b.get("df", pd.DataFrame())
+        tide_meta = b.get("tide_meta", {})
+        stname    = b.get("stname", "未知")
+        stid      = b.get("stid", "")
+
+        # ── 找主儀器、副儀器（與 build_vdc_figure 邏輯相同）────────────────
+        primary_stids = [s for s, m in tide_meta.items() if m.get("is_primary")]
+        if not primary_stids:
+            primary_stids = [s for s, m in tide_meta.items() if m.get("type") == 2]
+        primary_stid = primary_stids[0] if primary_stids else None
+
+        if diff_type == "auto":
+            other_stids = [s for s, m in tide_meta.items()
+                           if m.get("type") == 4 and s != primary_stid]
+            if not other_stids:
+                other_stids = [s for s, m in tide_meta.items()
+                               if m.get("type") == 3 and s != primary_stid]
+        else:
+            t = 4 if diff_type == "雷達式" else 3
+            other_stids = [s for s, m in tide_meta.items()
+                           if m.get("type") == t and s != primary_stid]
+
+        if not primary_stid or not other_stids:
+            continue
+
+        other_stid       = other_stids[0]
+        actual_type_desc = tide_meta.get(other_stid, {}).get("type_desc", "副儀器")
+        primary_wl_col   = f"WL_{primary_stid}"
+        diff_col         = f"Diff_{primary_stid}_{other_stid}"
+
+        if primary_wl_col not in df.columns or diff_col not in df.columns:
+            continue
+
+        sub_df = df[["Time", primary_wl_col, diff_col]].dropna()
+
+        # zoom 時間篩選
+        if zoom_range and not sub_df.empty:
+            try:
+                t0 = pd.to_datetime(zoom_range["x_start"])
+                t1 = pd.to_datetime(zoom_range["x_end"])
+                sub_df = sub_df[
+                    (sub_df["Time"] >= t0) & (sub_df["Time"] <= t1)
+                ].copy()
+            except Exception:
+                pass
+
+        if sub_df.empty:
+            continue
+
+        diff_series = sub_df[diff_col]
+        mean_val    = float(diff_series.mean())
+        std_val     = float(diff_series.std())
+
+        # ── 左欄：VdC 散佈圖 ────────────────────────────────────────────────
+        sub_df["Time_Numeric"] = (
+            pd.to_datetime(sub_df["Time"]).astype(np.int64) // 10**6
+        )
+        fig.add_trace(
+            go.Scattergl(
+                x=sub_df[diff_col],
+                y=sub_df[primary_wl_col],
+                mode="markers",
+                marker=dict(
+                    size=3,
+                    opacity=0.55,
+                    color=sub_df["Time_Numeric"],
+                    colorscale="Viridis",
+                    showscale=False,
+                ),
+                showlegend=False,
+            ),
+            row=row_idx, col=1,
+        )
+
+        # 回歸線
+        try:
+            from scipy.stats import linregress as _lr
+            res   = _lr(sub_df[primary_wl_col].values, sub_df[diff_col].values)
+            wl_ln = np.linspace(sub_df[primary_wl_col].min(),
+                                sub_df[primary_wl_col].max(), 200)
+            fig.add_trace(
+                go.Scatter(
+                    x=res.slope * wl_ln + res.intercept,
+                    y=wl_ln,
+                    mode="lines",
+                    line=dict(color="rgba(100,200,255,0.65)",
+                              width=1.2, dash="dash"),
+                    showlegend=False,
+                ),
+                row=row_idx, col=1,
+            )
+        except Exception:
+            pass
+
+        x_half = max(abs(mean_val) + 3 * std_val, 1.0)
+        fig.update_xaxes(range=[-x_half, x_half], row=row_idx, col=1)
+        fig.update_xaxes(
+            title_text=f"差值（音波式 - {actual_type_desc}）(mm)",
+            row=row_idx, col=1,
+        )
+        fig.update_yaxes(title_text="主儀器水位 (mm)", row=row_idx, col=1)
+
+        # ── 右欄：差值分佈直方圖 + 常態曲線 ────────────────────────────────
+        fig.add_trace(
+            go.Histogram(
+                x=diff_series,
+                nbinsx=40,
+                histnorm="probability density",
+                marker_color="rgba(100,160,220,0.55)",
+                showlegend=False,
+            ),
+            row=row_idx, col=2,
+        )
+
+        x_curve = np.linspace(mean_val - 4 * std_val,
+                              mean_val + 4 * std_val, 300)
+        fig.add_trace(
+            go.Scatter(
+                x=x_curve,
+                y=_norm.pdf(x_curve, mean_val, std_val),
+                mode="lines",
+                line=dict(color="rgba(255,120,120,0.85)", width=1.8),
+                showlegend=False,
+            ),
+            row=row_idx, col=2,
+        )
+        fig.add_vline(
+            x=mean_val, line_width=1.0,
+            line_color="rgba(255,127,14,0.7)",
+            annotation_text=f"μ={mean_val:.1f}",
+            annotation_font=dict(size=9, color="rgba(255,127,14,0.8)"),
+            row=row_idx, col=2,
+        )
+        fig.update_xaxes(
+            title_text="差值 (mm)", row=row_idx, col=2,
+        )
+        fig.update_yaxes(
+            title_text="機率密度", row=row_idx, col=2,
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#1E1E1E",
+        plot_bgcolor="#1E1E1E",
+        font=dict(family=_FONT, size=11, color="#E0E0E0"),
+        height=420 * n,
+        margin=dict(l=60, r=40, t=60, b=60),
+        showlegend=False,
+    )
+    return fig
 
 def _make_empty_figure(message: str) -> go.Figure:
     """產生包含錯誤或提示訊息的空白圖表。"""

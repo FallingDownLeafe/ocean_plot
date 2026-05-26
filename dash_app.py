@@ -926,6 +926,19 @@ app.layout = html.Div(
                                                                 ),
                                                                 html.Div(id="vdc-x-status",
                                                                         style={"fontSize": "11px", "color": "#888", "minHeight": "16px"}),
+                                                                html.Button(
+                                                                    "📥 匯出 PNG 報表",
+                                                                    id="vdc-export-btn",
+                                                                    n_clicks=0,
+                                                                    style={
+                                                                        "width": "100%", "marginTop": "12px",
+                                                                        "fontFamily": _FONT_UI, "fontSize": "13px",
+                                                                        "padding": "8px 0", "backgroundColor": "#1a3a5c",
+                                                                        "color": "#7eb8f7", "border": f"1px solid {_CLR_BORDER}",
+                                                                        "borderRadius": "4px", "cursor": "pointer",
+                                                                    },
+                                                                ),
+                                                                dcc.Download(id="vdc-download"),
                                                             ],
                                                         ),
                                                     ],
@@ -1303,6 +1316,44 @@ def capture_zoom(relayout_data, active_tab):
             return {"x_start": str(x0), "x_end": str(x1)}
 
     raise PreventUpdate
+
+# 直方圖用，針對 vdc-export-btn 的 Callback，讀取當前的 bundle-key-store 和 zoom-range-store
+@app.callback(
+    Output("vdc-download", "data"),
+    Input("vdc-export-btn", "n_clicks"),
+    State("bundle-key-store", "data"),
+    State("vdc-diff-type",   "value"),
+    State("zoom-range-store", "data"),
+    prevent_initial_call=True,
+)
+def export_vdc_report(n_clicks, key, diff_type, zoom_range):
+    import io
+    from datetime import date
+    from build_vdc_figure import build_vdc_report_figure
+
+    if not key:
+        raise PreventUpdate
+
+    bundle  = dash_bridge.get_bundle(key)
+    if bundle is None:
+        raise PreventUpdate
+
+    bundles = bundle if isinstance(bundle, list) else [bundle]
+    n       = len(bundles)
+
+    fig = build_vdc_report_figure(
+        bundles, diff_type or "auto", zoom_range=zoom_range
+    )
+
+    buf = io.BytesIO()
+    fig.write_image(
+        buf, format="png", scale=2,
+        width=1400, height=420 * n,
+    )
+    buf.seek(0)
+
+    filename = f"VdC_report_{date.today().strftime('%Y%m%d')}.png"
+    return dcc.send_bytes(buf.read(), filename)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # § 7  Entry Point
