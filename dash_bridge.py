@@ -42,9 +42,11 @@ _bundle_cache: dict[str, Any] = {}
 _lock = threading.Lock()
 _latest_key: str | None = None
 _land_range = None
+_typhoon_label: str | None = None      # ← 新增
+MAX_CACHE_SIZE = 10                  # [調整] 針對 24GB RAM 調整為較寬裕的快取量
 
 
-def set_bundle(key: str, bundle: Any, land_range=None) -> None:
+def set_bundle(key: str, bundle: Any, land_range=None, typhoon_label=None) -> None:
     """
     將 bundle 存入快取。
 
@@ -53,11 +55,17 @@ def set_bundle(key: str, bundle: Any, land_range=None) -> None:
     key    : 識別此筆資料的字串，例如 "main" 或測站代碼 "1176"。
     bundle : OceanDataEngine.fetch_bundle() 的回傳 dict（或任何可序列化物件）。
     """
-    global _latest_key, _land_range          # ← 必須在 with 區塊外面
+    global _latest_key, _land_range, _typhoon_label          # ← 必須在 with 區塊外面   # ← 加入 _typhoon_label
     with _lock:
+        # 改為滑動快取：若超過上限，刪除最舊的資料
+        if len(_bundle_cache) >= MAX_CACHE_SIZE:
+            oldest_key = next(iter(_bundle_cache))
+            _bundle_cache.pop(oldest_key, None)
+            
         _bundle_cache[key] = bundle
         _latest_key = key
         _land_range = land_range
+        _typhoon_label = typhoon_label      # ← 新增
 
 def get_bundle(key: str) -> Any:
     """
@@ -78,7 +86,14 @@ def get_latest_key() -> str | None:
     with _lock:
         return _latest_key
     
-
 def get_land_range():
     with _lock:
         return _land_range
+
+def get_typhoon_label() -> str | None:
+    with _lock:
+        return _typhoon_label
+    
+def get_cache_count() -> int:
+    with _lock:
+        return len(_bundle_cache)

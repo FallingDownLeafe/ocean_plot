@@ -54,7 +54,8 @@ if os.path.exists(_env_path):
                 _k, _v = _line.split('=', 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-DB_IP   = os.getenv("DB_IP",   "61.56.13.160")
+# DB_IP   = os.getenv("DB_IP",   "61.56.13.160")
+DB_IP   = os.getenv("DB_IP",   "61.56.13.104")
 DB_USER = os.getenv("DB_USER", "dps")
 
 
@@ -153,14 +154,16 @@ class OceanDataEngine:
         except Exception: return pd.DataFrame()
     
     def expand_data(self, df, val_name, freq='6min'):
-        if df.empty: return pd.DataFrame(columns=['Time', val_name])
+        # if df.empty: return pd.DataFrame(columns=['Time', val_name])
+        if df.empty: return pd.DataFrame({'Time': pd.to_datetime([]), val_name: []})
         prefix = 'MIN' if freq == '6min' else 'HR'
         val_cols = [c for c in df.columns if c.startswith(prefix)]
         # 保持原本動態邏輯：自動帶走所有非資料欄位（包含 QC、STID 等）
         id_cols = [c for c in df.columns if not c.startswith(prefix) and c != 'LASTUPDATETIME']
         melted = df.melt(id_vars=id_cols, value_vars=val_cols, var_name='idx', value_name=val_name)
         step = 6 if freq == '6min' else 60
-        melted['Time'] = (pd.to_datetime(melted['DATATIME']) + pd.to_timedelta(melted['idx'].str.extract('(\d+)')[0].astype(int)*step, unit='m')).dt.floor('min')
+        # melted['Time'] = (pd.to_datetime(melted['DATATIME']) + pd.to_timedelta(melted['idx'].str.extract('(\d+)')[0].astype(int)*step, unit='m')).dt.floor('min')
+        melted['Time'] = (pd.to_datetime(melted['DATATIME']) + pd.to_timedelta(melted['idx'].str.extract(r'(\d+)')[0].astype(int)*step, unit='m')).dt.floor('min')
         # 回傳時帶走 QC 欄位（若存在）。
         # 注意：呼叫此函數前應已按 QC 拆分，同一 QC 群組內不應有重複 Time，
         # drop_duplicates 僅作保險用途。
@@ -235,7 +238,9 @@ class OceanDataEngine:
                 'type': type_val,
                 'type_desc': type_desc,
                 'stnac': stnac,
-                'is_primary': is_primary
+                'is_primary': is_primary,
+                'stid_obs': row['stid_obs'],
+                'stid_new': row['stid_new'],
             }
             
             # 查詢觀測資料（不限制 QC，讓程式端處理）
@@ -257,14 +262,16 @@ class OceanDataEngine:
                     expanded_q = self.expand_data(df_q, f'WL_{stid}')
                     expanded_q = expanded_q.rename(columns={'QC': f'QC_{stid}'})
                 else:
-                    expanded_q = pd.DataFrame(columns=['Time', f'WL_{stid}', f'QC_{stid}'])
+                    # expanded_q = pd.DataFrame(columns=['Time', f'WL_{stid}', f'QC_{stid}'])
+                    expanded_q = pd.DataFrame({'Time': pd.to_datetime([]), f'WL_{stid}': [], f'QC_{stid}': []})
 
                 # 展開 QC≠Q 群組（原始機測值，欄位名加 _raw 以示區別）
                 if not df_bad.empty:
                     expanded_bad = self.expand_data(df_bad, f'WL_{stid}_raw')
                     expanded_bad = expanded_bad.rename(columns={'QC': f'QC_{stid}_raw'})
                 else:
-                    expanded_bad = pd.DataFrame(columns=['Time', f'WL_{stid}_raw', f'QC_{stid}_raw'])
+                    # expanded_bad = pd.DataFrame(columns=['Time', f'WL_{stid}_raw', f'QC_{stid}_raw'])
+                    expanded_bad = pd.DataFrame({'Time': pd.to_datetime([]), f'WL_{stid}_raw': [], f'QC_{stid}_raw': []})
 
                 # 以 Time 為鍵 outer merge，讓兩組資料並排在同一列
                 expanded = pd.merge(expanded_q, expanded_bad, on='Time', how='outer').sort_values('Time')
@@ -280,7 +287,7 @@ class OceanDataEngine:
             
             # 只為主測站查詢預報資料
             if is_primary:
-                # 諧和預報 (h)
+                # 調和預報 (h)
                 df_pred_h = pd.read_sql(
                     f"SELECT * FROM {self.tables['tide6ha']} WHERE STID='{stid}' AND QC='h' AND DATATIME BETWEEN '{start_str}' AND '{end_str}'",
                     self.conn
@@ -302,7 +309,56 @@ class OceanDataEngine:
             'pred_data_a': pred_data_a,
             'tide_meta': tide_meta
         }
+    def fetch_tidal_extrema(self, stid: str, s_s: str, e_s: str):
+        """
+        查詢天文潮高低潮預報極值（tideh）與觀測對應高低潮（tidehl）。
 
+        Parameters
+        ----------
+        stid : str   測站代碼
+        s_s  : str   起始時間字串（'YYYY-MM-DD HH:MM:SS'）
+        e_s  : str   結束時間字串
+
+        Returns
+        -------
+        tideh_df  : pd.DataFrame  欄位 DATATIME, HEIGHT, HORL, QC
+                    QC = 'a'（重建分析）或 'h'（調和預報）
+        tidehl_df : pd.DataFrame  欄位 DATATIME, HEIGHT, HORL, QC
+                    QC = 'Q' 品管通過，其他為異常旗標
+        HEIGHT 單位均為 mm，與 tide6 相同，不需額外縮放。
+        """
+        try:
+            tideh_df = pd.read_sql(
+                f"SELECT DATATIME, HEIGHT, HORL, QC "
+                f"FROM tideh "
+                f"WHERE STID='{stid}' "
+                f"AND DATATIME BETWEEN '{s_s}' AND '{e_s}'",
+                self.conn
+            )
+            if not tideh_df.empty:
+                tideh_df.columns = [c.upper() for c in tideh_df.columns]
+                tideh_df['DATATIME'] = pd.to_datetime(tideh_df['DATATIME'])
+        except Exception as e:
+            print(f"[fetch_tidal_extrema] tideh 查詢失敗 ({stid}): {e}")
+            tideh_df = pd.DataFrame(columns=['DATATIME', 'HEIGHT', 'HORL', 'QC'])
+
+        try:
+            tidehl_df = pd.read_sql(
+                f"SELECT DATATIME, HEIGHT, HORL, QC "
+                f"FROM tidehl "
+                f"WHERE STID='{stid}' "
+                f"AND DATATIME BETWEEN '{s_s}' AND '{e_s}'",
+                self.conn
+            )
+            if not tidehl_df.empty:
+                tidehl_df.columns = [c.upper() for c in tidehl_df.columns]
+                tidehl_df['DATATIME'] = pd.to_datetime(tidehl_df['DATATIME'])
+        except Exception as e:
+            print(f"[fetch_tidal_extrema] tidehl 查詢失敗 ({stid}): {e}")
+            tidehl_df = pd.DataFrame(columns=['DATATIME', 'HEIGHT', 'HORL', 'QC'])
+
+        return tideh_df, tidehl_df
+    
     def fetch_bundle(self, stid, start, end):
         s_s, e_s = start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')
         
@@ -358,7 +414,8 @@ class OceanDataEngine:
                 main = list(wl_data.values())[0][['Time']].copy()
             else:
                 # 如果沒有水位資料，建立空 DataFrame
-                main = pd.DataFrame(columns=['Time'])
+                # main = pd.DataFrame(columns=['Time'])
+                main = pd.DataFrame({'Time': pd.to_datetime([])})
             
             # B. 逐個 merge 所有水位儀器
             for stid_wl, wl_df in wl_data.items():
@@ -484,6 +541,10 @@ class OceanDataEngine:
         # 初始化為空 Resi（以防萬一）
         if 'Resi' not in main.columns:
             main['Resi'] = np.nan
+        
+        # 3.5 查詢高低潮極值（tideh 天文潮/調和預報 / tidehl 觀測對應值）
+        # 不 merge 進 main（採樣點稀疏，不同節拍），改存入 bundle dict 分開傳遞
+        tideh_df, tidehl_df = self.fetch_tidal_extrema(stid, s_s, e_s)
 
         # 4. 初始化環境變數 DataFrame
         p_data, w_data, at_data, wt_data, wv_data, cu_data = [pd.DataFrame() for _ in range(6)]
@@ -578,8 +639,10 @@ class OceanDataEngine:
                         raw_at['QC_UP'] = raw_at['QC'].str.upper()
                         at_q   = raw_at[raw_at['QC_UP'] == 'Q']
                         at_bad = raw_at[raw_at['QC_UP'] != 'Q']
-                        df_at_q   = self.expand_data(at_q,   'AT',     '1h') if not at_q.empty   else pd.DataFrame(columns=['Time', 'AT'])
-                        df_at_bad = self.expand_data(at_bad, 'AT_raw', '1h') if not at_bad.empty else pd.DataFrame(columns=['Time', 'AT_raw'])
+                        # df_at_q   = self.expand_data(at_q,   'AT',     '1h') if not at_q.empty   else pd.DataFrame(columns=['Time', 'AT'])
+                        # df_at_bad = self.expand_data(at_bad, 'AT_raw', '1h') if not at_bad.empty else pd.DataFrame(columns=['Time', 'AT_raw'])
+                        df_at_q   = self.expand_data(at_q,   'AT',     '1h') if not at_q.empty   else pd.DataFrame({'Time': pd.to_datetime([]), 'AT': []})
+                        df_at_bad = self.expand_data(at_bad, 'AT_raw', '1h') if not at_bad.empty else pd.DataFrame({'Time': pd.to_datetime([]), 'AT_raw': []})
                         if not df_at_q.empty:   df_at_q['AT']     *= 0.1
                         if not df_at_bad.empty:
                             df_at_bad['AT_raw'] *= 0.1
@@ -616,8 +679,10 @@ class OceanDataEngine:
                         raw_wt['QC_UP'] = raw_wt['QC'].str.upper()
                         wt_q   = raw_wt[raw_wt['QC_UP'] == 'Q']
                         wt_bad = raw_wt[raw_wt['QC_UP'] != 'Q']
-                        df_wt_q   = self.expand_data(wt_q,   'WT',     '1h') if not wt_q.empty   else pd.DataFrame(columns=['Time', 'WT'])
-                        df_wt_bad = self.expand_data(wt_bad, 'WT_raw', '1h') if not wt_bad.empty else pd.DataFrame(columns=['Time', 'WT_raw'])
+                        # df_wt_q   = self.expand_data(wt_q,   'WT',     '1h') if not wt_q.empty   else pd.DataFrame(columns=['Time', 'WT'])
+                        # df_wt_bad = self.expand_data(wt_bad, 'WT_raw', '1h') if not wt_bad.empty else pd.DataFrame(columns=['Time', 'WT_raw'])
+                        df_wt_q   = self.expand_data(wt_q,   'WT',     '1h') if not wt_q.empty   else pd.DataFrame({'Time': pd.to_datetime([]), 'WT': []})
+                        df_wt_bad = self.expand_data(wt_bad, 'WT_raw', '1h') if not wt_bad.empty else pd.DataFrame({'Time': pd.to_datetime([]), 'WT_raw': []})
                         if not df_wt_q.empty:   df_wt_q['WT']     *= 0.1
                         if not df_wt_bad.empty:
                             df_wt_bad['WT_raw'] *= 0.1
@@ -741,6 +806,8 @@ class OceanDataEngine:
             'tide_meta': tide_meta,  # [新增] 水位儀器元數據 {STID: {type, type_desc, stnac, is_primary}}
             'mr_full': mr_full,      # [新增] 全年平均潮差
             'mr_month': mr_month,    # [新增] 當月平均潮差
+            'tideh_df':  tideh_df,    # [新增] 天文潮高低潮預報極值
+            'tidehl_df': tidehl_df,   # [新增] 觀測高低潮對應值
             'df': main
         }
 
@@ -1684,11 +1751,13 @@ if __name__ == "__main__":
 
                     ## 加入查看水位細節按鈕，用不同mode呼叫go函式
                     tk.Button(btn_box, text=" 🔍 查看水位細節", bg="#3a17b8", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),
-                  command=lambda: self.go(mode="water")).pack(side="left", padx=10)
+                            command=lambda: self.go(mode="water")).pack(side="left", padx=10)
                     # [修改] 使用 lambda 傳遞 mode="full"
                     tk.Button(btn_box, text="查看海洋參數", bg="#28a745", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
                             command=lambda: self.go(mode="full")).pack(side="left", padx=5)
-                    tk.Button(btn_box, text="查看統計", bg="#17a2b8", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
+                    tk.Button(btn_box, text=" 匯出暴潮偏差圖", bg="#b81717", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),
+                          command=lambda: self.go(mode="storm")).pack(side="left", padx=10)
+                    tk.Button(btn_box, text="匯出統計報表", bg="#17a2b8", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
                             command=self.show_stats).pack(side="left", padx=5)
 
                 def on_yr(self, e):
@@ -1716,7 +1785,8 @@ if __name__ == "__main__":
 
                     # 3. [防呆] 檢查時間跨度 (依據模式給予不同限制)
                     # 水位細節模式可以看長一點(365天)，全參數模式限制(45天)
-                    LIMIT_DAYS = 365 if mode == "water" else 45 
+                    # LIMIT_DAYS = 365 if mode == "water" else 45 
+                    LIMIT_DAYS = 365 if mode == "water" else (30 if mode == "storm" else 45)
                     delta = end_date - start_date
                     if delta.days > LIMIT_DAYS:
                         messagebox.showwarning("範圍過大", f"此模式建議時間範圍為 {LIMIT_DAYS} 天以內。\n請縮小範圍。")
@@ -1763,9 +1833,82 @@ if __name__ == "__main__":
                             key = f"{stids[0]}_{time.time()}"
                             dash_bridge.set_bundle(key, bundles, land_range=current_lr)
                             # print(f"[go] current_lr={current_lr}")      # ← 加這行
-                            webbrowser.open(f"http://127.0.0.1:{DASH_PORT}")
-                        else:
+                            ty_label = self.ty_cb.get() or None   # e.g. "丹娜絲(2504L)"，未選颱風時為 None
+                            dash_bridge.set_bundle(key, bundles, land_range=current_lr, typhoon_label=ty_label)
+                            print(f"[DEBUG go] ty_label={repr(ty_label)}")
+                            webbrowser.open(f"http://127.0.0.1:{DASH_PORT}/?key={key}")
+                        # else:
+                        elif mode == "full":
                             draw_diagnostic(bundles, current_lr)
+
+                        elif mode == "storm":
+                            from build_surge_report_figure import build_surge_report_figure, get_tsuwawa_thresholds
+
+                            # 暴潮報表只支援單站
+                            if len(bundles) > 1:
+                                messagebox.showwarning("提示", "暴潮偏差報表每次只支援單站，\n將使用第一個選取站。")
+                            bundle = bundles[0]
+                            stid_for_storm = bundle['stid']
+
+                            # 取颱風資訊：從 ty_cb 顯示字串解析 ID，再查 ty_df
+                            typhoon_info_dict = {
+                                'id': '', 'cname': '（未指定颱風）',
+                                'warnSeaBeg': None, 'warnSeaEnd': None,
+                                'warnLandBeg': None, 'warnLandEnd': None,
+                            }
+                            selected_ty = self.ty_cb.get()          # e.g. "丹娜絲(2504L)"
+                            if selected_ty and hasattr(self, 'ty_df') and not self.ty_df.empty:
+                                tid = selected_ty.split('(')[-1].rstrip(')')    # "2504L"
+                                row = self.ty_df[self.ty_df['id'] == tid]
+                                if not row.empty:
+                                    typhoon_info_dict = row.iloc[0].to_dict()
+
+                            thresholds = get_tsuwawa_thresholds(self.e.conn, stid_for_storm)
+                            if thresholds is None:
+                                messagebox.showwarning(
+                                    "提示", f"測站 {stid_for_storm} 查無 tsuwawa 門檻值，\n圖上將不顯示警戒線。"
+                                )
+
+                            fig = build_surge_report_figure(bundle, typhoon_info_dict, thresholds)
+
+                            # 這個設定方式不會自動存圖檔
+                            # import tempfile, os
+                            # tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                            # fig.write_image(tmp.name, width=1400, height=500, scale=2)
+                            # os.startfile(tmp.name)
+
+                            import os, datetime
+                            surge_dir = os.path.join(BASE_DIR, "surge_reports")
+                            os.makedirs(surge_dir, exist_ok=True)
+                            ty_id = typhoon_info_dict.get('id', 'unknown')
+                            fname = f"surge_{stid_for_storm}_{ty_id}_{datetime.date.today():%Y%m%d}.png"
+                            outpath = os.path.join(surge_dir, fname)
+                            fig.write_image(outpath, width=1400, height=500, scale=2)
+                            os.startfile(outpath)
+                            messagebox.showinfo("匯出完成", f"已儲存至：\n{outpath}")
+
+                    #     elif mode == "storm":
+                    #         from build_surge_report_figure import build_surge_report_figure, get_tsuwawa_thresholds
+
+                    #         # 暴潮報表只支援單站
+                    #         if len(bundles) > 1:
+                    #             messagebox.showwarning("提示", "暴潮偏差報表每次只支援單站，\n將使用第一個選取站。")
+                    #         bundle = bundles[0]
+                    #         stid_for_storm = bundle['stid']
+
+                    #         # 取目前選取的颱風資訊（見下方說明）
+                    #         typhoon_info = self._get_selected_typhoon_info()
+
+                    #         thresholds = get_tsuwawa_thresholds(self.engine.conn, stid_for_storm)
+                    #         if thresholds is None:
+                    #             messagebox.showwarning("提示", f"測站 {stid_for_storm} 查無 tsuwawa 門檻值，\n圖上將顯示查無資料提示。")
+
+                    #         fig = build_surge_report_figure(bundle, typhoon_info, thresholds)
+
+                    #         import tempfile, os
+                    #         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    #         fig.write_image(tmp.name, width=1400, height=500, scale=2)
+                    #         os.startfile(tmp.name)
                         
                     except Exception as err:
                         messagebox.showerror("執行錯誤", f"資料讀取或繪圖失敗：\n{err}")

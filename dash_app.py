@@ -30,6 +30,7 @@ from build_water_figure import build_water_figure
 from build_vdc_figure import build_vdc_figure
 
 # ── 環境設定 ──────────────────────────────────────────────────────────────────
+import urllib.parse
 DASH_PORT = int(os.getenv("DASH_PORT", "8050"))
 DASH_HOST = "127.0.0.1"
 MIN_COLS  = [f"MIN{i}" for i in range(10)]
@@ -109,21 +110,32 @@ def build_mode2_sql_by_time(sel: dict, stid: str,
 
     if not grouped:
         return (
-            "-- ⚠️  無法從選中的點反推 MIN 欄位\n"
-            "-- 請確認 x 軸為 tide6 展開後的 6min 時間格式"
+            "-- 💡 提示：請確保使用 □ (Box Select) 框選「水位觀測值」點位\n"
+            "-- (若選取範圍僅包含預報線或非數據區域，將無法生成 SQL)"
         )
 
+    # 優化：將具有相同修改欄位組合的 DATATIME 歸類在一起，使用 IN (...) 合併 SQL
+    set_to_times = defaultdict(list)
+    for datatime_str, cols in grouped.items():
+        col_tuple = tuple(sorted(list(cols), key=lambda c: int(c[3:])))
+        set_to_times[col_tuple].append(datatime_str)
+
     sqls = []
-    for datatime_str in sorted(grouped.keys()):
-        cols       = sorted(grouped[datatime_str], key=lambda c: int(c[3:]))
+    for cols, times in set_to_times.items():
         set_clause = ",\n       ".join(
             f"{c} = {c} {operator} {operand}" for c in cols
         )
+        if len(times) == 1:
+            where_time = f"= '{times[0]}'"
+        else:
+            time_list = ", ".join([f"'{t}'" for t in sorted(times)])
+            where_time = f"IN ({time_list})"
+
         sqls.append(
             f"UPDATE tide6\n"
             f"SET    {set_clause}\n"
             f"WHERE  STID     = '{stid}'\n"
-            f"  AND  DATATIME = '{datatime_str}';"
+            f"  AND  DATATIME {where_time};"
         )
 
     header = (
@@ -337,6 +349,7 @@ app.layout = html.Div(
     children=[
 
         # ── Store ─────────────────────────────────────────────────────────────
+        dcc.Location(id="url", refresh=False),  # [新增] 用於監聽網址參數
         # figure-store：整合 Tkinter 後，Interval 輪詢 shared_state 寫入此處
         dcc.Store(id="figure-store"),
         # stid-store：當前主測站代碼（Tkinter push_figure 時一併更新）
@@ -361,9 +374,15 @@ app.layout = html.Div(
                     "海洋動力診斷儀表板",
                     style={"margin": 0, "fontSize": "17px", "fontWeight": 600},
                 ),
-                html.Span(
-                    "QC 框選模式",
-                    style={"marginLeft": "auto", "fontSize": "12px", "opacity": 0.65},
+                # 修改：將狀態標籤改為可點擊的按鈕，並增加提示
+                html.Button(
+                    id="page-lock-status",
+                    title="點擊切換為自動跟隨模式",
+                    style={
+                        "marginLeft": "auto", "fontSize": "12px", "cursor": "pointer",
+                        "backgroundColor": "transparent", "border": "none", "outline": "none",
+                        "fontFamily": _FONT_UI
+                    }
                 ),
             ],
         ),
@@ -816,11 +835,42 @@ app.layout = html.Div(
                                         "color": "#d4d4d4",
                                         "boxSizing": "border-box",
                                     },
+                    #             ),
+                    #         ],
+                    #     ),
+
+                    # # ],  # end QC 面板 children
+                                                    ),
+                            ],
+                        ),
+
+                        # §F  匯出白底 PNG（簡報用）
+                        html.Div(
+                            style={
+                                "backgroundColor": "#1e2a3a",
+                                "border": f"1px solid {_CLR_BORDER}",
+                                "borderRadius": "8px",
+                                "padding": "14px 16px",
+                            },
+                            children=[
+                                html.Button(
+                                    "📥 匯出白底醜字體 PNG",
+                                    id="water-export-btn",
+                                    n_clicks=0,
+                                    style={
+                                        "width": "100%",
+                                        "fontFamily": _FONT_UI, "fontSize": "13px",
+                                        "padding": "8px 0", "backgroundColor": "#1a3a5c",
+                                        "color": "#7eb8f7", "border": f"1px solid {_CLR_BORDER}",
+                                        "borderRadius": "4px", "cursor": "pointer",
+                                    },
                                 ),
+                                dcc.Download(id="water-download"),
                             ],
                         ),
 
                     # ],  # end QC 面板 children
+
                     ],  # end Tab 1 children
                                 ),  # end Tab 1
 
@@ -1061,50 +1111,87 @@ def on_selection(selected_data, mode, new_qc, operator, operand, stid):
     return sql, info, status
 
 
+# 修改輪詢 callback，增加快取數量輸出
 @app.callback(
     Output("bundle-key-store", "data"),
-    Input("bundle-poll",       "n_intervals"),
-    State("bundle-key-store",  "data"),
+    Output("status-bar", "children"),
+    Input("bundle-poll", "n_intervals"),
+    State("bundle-key-store", "data"),
+    State("stid-store", "data"),
 )
-def poll_bundle(n_intervals, current_key):
+def poll_bundle(n_intervals, current_key, stid):
     latest = dash_bridge.get_latest_key()
-    # 如果橋接層有新資料，立即更新 Store
-    if latest:
-        if latest != current_key:
-            return latest
-    # # 若為第一次執行且橋接層無資料（代表可能是獨立啟動 dash_app.py 進行開發測試）
-    # 為了跳轉畫面美觀關掉試試
-    # elif n_intervals == 0:
-    #     return "demo"
-        
-    return no_update
+    cache_cnt = dash_bridge.get_cache_count()
+    
+    # 更新狀態列文字
+    status_text = f"就緒｜STID：{stid or '無'}｜快取佔用：{cache_cnt} / {dash_bridge.MAX_CACHE_SIZE}"
+    
+    if latest and latest != current_key:
+        return latest, status_text
+    
+    # 即使 Key 沒變，也要更新狀態列（因為快取數量可能變動）
+    return no_update, status_text
+
+# ── 新增：處理解除固定的 Callback ──
+@app.callback(
+    Output("url", "search"),
+    Input("page-lock-status", "n_clicks"),
+    prevent_initial_call=True
+)
+def unlock_page(n_clicks):
+    return ""  # 清空 URL 參數，恢復自動跟隨
+
 
 @app.callback(
     Output("main-graph", "figure"),
     Output("stid-store", "data"),
     Output("vdc-stats-output", "children"),
+    Output("page-lock-status", "children"),
+    Output("page-lock-status", "style"),
     Input("bundle-key-store", "data"),
+    Input("url", "search"),
     Input("right-panel-tabs", "value"),
     Input("vdc-diff-type", "value"),
-    Input("zoom-range-store", "data"),   # ← 新增
+    # Input("zoom-range-store", "data"),
+    State("zoom-range-store", "data"), # 不當作必要觸發項目
 )
-def render_figure(key, active_tab, diff_type, zoom_range):
-    if not key:
-        return no_update, no_update, no_update
+def render_figure(poll_key, url_search, active_tab, diff_type, zoom_range):
+    # 優先從 URL 抓取 Key，若無則用輪詢到的最新 Key
+    target_key = poll_key
+    lock_text = "🔄 自動跟隨主程式"
+    lock_style = {"marginLeft": "auto", "fontSize": "12px", "color": "#888", "fontFamily": _FONT_UI}
 
+    if url_search:
+        params = urllib.parse.parse_qs(url_search.lstrip('?'))
+        url_key = params.get('key', [None])[0]
+        if url_key:
+            target_key = url_key
+            lock_text = "📌 分頁資料已固定 (點擊解除)"
+            lock_style = {
+                "marginLeft": "auto", "fontSize": "12px", "color": "#7eb8f7", 
+                "fontWeight": "bold", "backgroundColor": "rgba(126, 184, 247, 0.1)",
+                "padding": "2px 8px", "borderRadius": "4px", "cursor": "pointer",
+                "fontFamily": _FONT_UI
+            }
+
+    key = target_key
+    if not key:
+        return no_update, no_update, no_update, lock_text, lock_style
     if key == "demo":
-        return make_demo_figure(), _DEMO_STID, no_update
+        return make_demo_figure(), _DEMO_STID, no_update, lock_text, lock_style
 
     bundle = dash_bridge.get_bundle(key)
     if bundle is None:
-        return no_update, no_update, no_update
+        # return no_update, no_update, no_update
+        # 若 key 存在但資料已被 MAX_CACHE_SIZE 清理掉
+        return go.Figure(layout=dict(title="⚠️ 資料快取已過期，請重新從主程式查詢")), no_update, "快取已清空", lock_text, lock_style
 
     bundles = bundle if isinstance(bundle, list) else [bundle]
     primary_stid = bundles[0].get("stid", _DEMO_STID) if bundles else _DEMO_STID
 
     if active_tab == "tab-vdc":
         try:
-        # zoom_range 作為 Input（而非 State）的好處是：使用者在水位圖 zoom 後，若已在 VdC tab，圖會立即自動更新，不需要手動觸發。
+        # zoom_range 作為 Input（而非 State）的好處是：使用者在水位圖 zoom 後，若已在 VdC tab，圖會立即自動更新，不需要手動觸發。 （這句哪個AI寫的啊，也太怪了吧，難怪我會需要改回state...）
         # 修正：必須將 zoom_range 作為參數傳入函式
             fig, stats_summary = build_vdc_figure(
                 bundles, diff_type or "auto", 
@@ -1130,15 +1217,20 @@ def render_figure(key, active_tab, diff_type, zoom_range):
                         f"測站 {stid_key}：{stats.get('status', '未知')}",
                         style={"color": "#d9534f", "marginBottom": "8px"}
                     ))
-            return fig, primary_stid, stats_children or "無統計資料。"
+            return fig, primary_stid, stats_children or "無統計資料。", lock_text, lock_style
         except Exception as e:
             import traceback
             traceback.print_exc()   # 印到 server 終端機
             print(f"[VdC ERROR] {e}")
-            return no_update, no_update, f"錯誤：{e}"
+            return no_update, no_update, f"錯誤：{e}", lock_text, lock_style
     else:
         lr = dash_bridge.get_land_range()
-        return build_water_figure(bundles, land_range=lr), primary_stid, no_update
+        typhoon_label = dash_bridge.get_typhoon_label()
+        # fig = build_water_figure(bundles, land_range=land_range, typhoon_label=typhoon_label)
+        print(f"[DEBUG dash] typhoon_label={repr(typhoon_label)}")
+        fig = build_water_figure(bundles, land_range=lr, typhoon_label=typhoon_label)
+        return fig, primary_stid, no_update, lock_text, lock_style
+        return build_water_figure(bundles, land_range=lr), primary_stid, no_update, lock_text, lock_style
 
 # @app.callback(
 #     Output("main-graph", "figure"),
@@ -1299,7 +1391,7 @@ def apply_vdc_x_range(n_apply, n_clear, x_range, current_fig, active_tab):
     prevent_initial_call=True,
 )
 def capture_zoom(relayout_data, active_tab):
-    if active_tab == "tab-vdc" or not relayout_data:
+    if active_tab == "tab-vdc" or not relayout_data: 
         raise PreventUpdate
 
     # 使用者 double-click 或按 autoscale 重設縮放 → 清除記錄
@@ -1328,7 +1420,7 @@ def capture_zoom(relayout_data, active_tab):
 )
 def export_vdc_report(n_clicks, key, diff_type, zoom_range):
     import io
-    from datetime import date
+    from datetime import datetime
     from build_vdc_figure import build_vdc_report_figure
 
     if not key:
@@ -1352,9 +1444,73 @@ def export_vdc_report(n_clicks, key, diff_type, zoom_range):
     )
     buf.seek(0)
 
-    filename = f"VdC_report_{date.today().strftime('%Y%m%d')}.png"
+    # 辨識度優化：加入第一個測站 ID 作為識別，並修正時間戳記
+    first_stid = bundles[0].get("stid", "unknown")
+    suffix = "etc" if n > 1 else ""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"VdC_Report_{first_stid}{suffix}_{timestamp}.png"
     return dcc.send_bytes(buf.read(), filename)
 
+# 針對 water-export-btn 的 Callback，讀取當前的 bundle-key-store
+@app.callback(
+    Output("water-download", "data"),
+    Input("water-export-btn", "n_clicks"),
+    State("bundle-key-store", "data"),
+    State("main-graph", "figure"),   # ← 新增：讀取畫面上目前的圖，含手動開關的圖例狀態
+    prevent_initial_call=True,
+)
+def export_water_report(n_clicks, key, current_fig):
+    import io
+    from datetime import datetime
+    from build_water_figure import build_water_report_figure
+
+    if not key:
+        raise PreventUpdate
+
+    bundle = dash_bridge.get_bundle(key)
+    if bundle is None:
+        raise PreventUpdate
+
+    bundles = bundle if isinstance(bundle, list) else [bundle]
+    n = len(bundles)
+    land_range = dash_bridge.get_land_range()
+
+    fig = build_water_report_figure(bundles, land_range=land_range)
+
+    # ── 套用畫面上目前的圖例開關狀態（以線名 name 對應）──────────────
+    if current_fig and current_fig.get("data"):
+        visible_by_name = {
+            tr.get("name"): tr.get("visible", True)
+            for tr in current_fig["data"]
+        }
+        for tr in fig.data:
+            if tr.name in visible_by_name:
+                tr.visible = visible_by_name[tr.name]
+
+    # ── 若某測站的差值折線已全部被隱藏，連帶隱藏該站右側 Y 軸 ──────────
+    # 軸編號規則同 apply_yaxis_range：右軸（差值）= 偶數編號 yaxis2, yaxis4...
+    for i in range(1, n + 1):
+        diff_trace_yaxis = f"y{2 * i}"       # 該列右軸的 trace.yaxis 值
+        diff_axis_key    = f"yaxis{2 * i}"   # 該列右軸在 layout 裡的 key
+        any_diff_visible = any(
+            (tr.yaxis or "y") == diff_trace_yaxis and tr.visible in (True, None)
+            for tr in fig.data
+        )
+        if not any_diff_visible:
+            fig.update_layout({diff_axis_key: dict(visible=False)})
+
+    buf = io.BytesIO()
+    fig.write_image(
+        buf, format="png", scale=2,
+        width=1400, height=600 * n,
+    )
+    buf.seek(0)
+
+    first_stid = bundles[0].get("stid", "unknown")
+    suffix = "etc" if n > 1 else ""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"Water_Report_{first_stid}{suffix}_{timestamp}.png"
+    return dcc.send_bytes(buf.read(), filename)
 # ══════════════════════════════════════════════════════════════════════════════
 # § 7  Entry Point
 #
