@@ -1,6 +1,6 @@
-# 🌊 海洋動力診斷儀表板 — SYSTEM.md
+# 🌊 海洋動力診斷儀表板 — SYSTEM_DASH.md
 
-> 技術文件版本：2025-05  
+> 技術文件版本：2026-08-14
 > 架構版本：Tkinter + Dash（已從 Tkinter + Plotly HTML 遷移完成）
 
 ---
@@ -16,8 +16,11 @@
 3. [Tkinter 與 Dash 的資料流](#3-tkinter-與-dash-的資料流)
 4. [QC 框選產生 SQL 的機制](#4-qc-框選產生-sql-的機制)
 5. [資料庫欄位與 QC 慣例速查](#5-資料庫欄位與-qc-慣例速查)
-6. [已知限制與待辦事項](#6-已知限制與待辦事項)
-7. [打包注意事項（PyInstaller）](#7-打包注意事項pyinstaller)
+6. [視覺規範與樣式定義](#6-視覺規範與樣式定義-visual-standards)
+7. [VdC 散佈圖模組（2026-05-25）](#7-vdc-散佈圖模組2026-05-25)
+8. [暴潮偏差報表圖模組（2026-08）](#8-暴潮偏差報表圖模組2026-08)
+9. [已知限制與待辦事項](#9-已知限制與待辦事項)
+10. [打包注意事項（PyInstaller）](#10-打包注意事項pyinstaller)
 
 ---
 
@@ -34,8 +37,10 @@
 │  ├─ LoginWindow  → 建立 OceanDataEngine（DB 連線）             │
 │  └─ MainApp      → 查詢控制 UI，選站、選期、選模式              │
 │       ├─ go(mode="full")  → draw_diagnostic()  HTML 圖表       │
-│       └─ go(mode="water") → dash_bridge.set_bundle()          │
-│                             webbrowser.open(Dash URL)          │
+│       ├─ go(mode="water") → dash_bridge.set_bundle()          │
+│       │                     webbrowser.open(Dash URL)          │
+│       └─ go(mode="storm") → build_surge_report_figure()       │
+│                             → 儲存至 surge_reports/ 並開啟     │
 └──────────────────┬───────────────────────────────────────────┘
                    │  dash_bridge（同 process 內共用記憶體）
                    ▼
@@ -46,7 +51,9 @@
 │  │     └─ dash_bridge.get_latest_key() 偵測新資料             │
 │  ├─ render_water_figure callback                              │
 │  │     └─ build_water_figure.build_water_figure(bundles)      │
-│  └─ on_selection callback（Box Select → SQL 產生）            │
+│  ├─ on_selection callback（Box Select → SQL 產生）            │
+│  ├─ export_water_report callback → build_water_report_figure() │
+│  └─ export_surge_report callback → build_surge_report_figure() │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,7 +65,7 @@
 | QC 框選回傳 | 自製 HTTP callback server + queue | Dash `selectedData` callback |
 | 執行緒溝通 | `_selection_queue`（舊 plotly_qc_select.py）| `dash_bridge`（threading.Lock 保護的記憶體快取）|
 | QC SQL 產生 | `SqlDialog` Tkinter Toplevel | Dash 右側 QC 面板 + `dcc.Textarea` |
-| 模式切換 | 單一 go() 路徑 | `mode="water"` → Dash；`mode="full"` → HTML |
+| 模式切換 | 單一 go() 路徑 | `mode="water"` → Dash；`mode="full"` → HTML；`mode="storm"` → 暴潮偏差 PNG |
 
 ---
 
@@ -86,10 +93,15 @@
 
 - 登入視窗（`LoginWindow`）：建立 `OceanDataEngine` 並取得 DB 連線
 - 測站選單：從 CSV 或 DB 讀取的 `mapping_df` 動態填充
+  - **動態活站篩選**：「只列有資料站」按鈕，依目前所選時間範圍即時查詢 `tide6` 資料表，僅保留有觀測紀錄的測站，節省無效查詢時間
+  - **單位快速選取**：「選氣象署」與「非氣象署」按鈕，依 `sponsor_map` 對應之業務單位執行批次勾選
 - 日期選擇：tkcalendar `DateEntry`，含防呆（日期順序、時間範圍上限）
 - `go(mode)` 方法：
-  - `mode="water"`：呼叫 `dash_bridge.set_bundle()`，以 `webbrowser.open()` 導向 Dash URL
+  - `mode="water"`：呼叫 `dash_bridge.set_bundle()`（含 `typhoon_info` 與 `thresholds_map`），以 `webbrowser.open()` 導向 Dash URL
   - `mode="full"`：呼叫 `draw_diagnostic()`，產生全參數的多子圖 Plotly HTML
+  - `mode="storm"`：呼叫 `build_surge_report_figure()`，儲存至本機 `surge_reports/` 資料夾並以 `os.startfile()` 開啟；僅支援單站（多站時自動取第一站）
+
+> **`mode="water"` 的附加資料傳遞**：`go()` 在呼叫 `set_bundle()` 前，會同步查詢颱風 info dict（從 `self.ty_cb` → `self.ty_df` 反查）和各站門檻值（`get_tsuwawa_thresholds(self.e.conn, stid)` 逐站查詢），一併存入 dash_bridge，供 Dash 端「匯出暴潮偏差圖」按鈕使用。
 
 #### `draw_diagnostic()`（全參數圖）
 
@@ -99,21 +111,33 @@
 
 ### 2.2 `dash_bridge.py`
 
-**角色：執行緒安全的資料快取橋接層**
+**角色：跨執行緒橋接層**
 
-```
-Tkinter 主執行緒           Dash callback 執行緒
-    set_bundle(key, bundle)  →  get_bundle(key)
-    set_bundle(..., land_range)  →  get_land_range()
-    get_latest_key()         ←  poll_bundle callback 輪詢
-```
+負責主進程（Tkinter）與子執行緒（Dash/Flask）間的資料交換。
 
-- 以 `threading.Lock` 保護所有讀寫，防止 race condition
-- 快取結構：`_bundle_cache: dict[str, Any]`，支援多 key 共存
-- `_latest_key`：最後一次寫入的 key，供 Dash poll callback 偵測更新
-- `land_range`：颱風陸上警報時段，與 bundle 同步傳遞，用於繪製紅色警報色帶
+- **滾動快取機制**：為防止記憶體無限增長，設定 `MAX_CACHE_SIZE = 10`。當存入新資料超過上限時，自動刪除最舊的 bundle，確保長效運作穩定。
+- **執行緒安全**：使用 `threading.Lock` 確保在多使用者（或多瀏覽器分頁）同時讀取與 Tkinter 寫入時不會產生 Race Condition。
+- **關鍵資料傳遞**：
+    - `_bundle_cache`：以 `stid_timestamp` 為 Key 儲存多筆測站資料。
+    - `_latest_key`：記錄最後一次寫入的 Key，供 Dash 端 `dcc.Interval` 輪詢偵測更新。
+    - `_land_range`：同步傳遞颱風陸上警報時段，供繪圖模組標註紅色警報色帶。
+    - `_typhoon_label`：目前選擇的颱風名稱與編號（如「丹娜絲(2504L)」），供 Dash 繪製標題或存取颱風屬性使用。
+    - `_typhoon_info`：完整颱風事件 dict（`id` / `cname` / `warnSeaBeg` / `warnSeaEnd` / `warnLandBeg` / `warnLandEnd`），供暴潮偏差圖匯出使用。Tkinter `go(mode="water")` 在有颱風選取時傳入；未選颱風時為 `None`。
+    - `_thresholds_map`：各測站的大潮注意值 / 警戒值（key = stid，值為 `{"警戒值_mm": float, "注意值_mm": float}` 或 `None`），由 Tkinter 在 `go()` 逐站呼叫 `get_tsuwawa_thresholds()` 後一併傳入。
 
-> **職責邊界：** 本模組**只做存取**，不含任何繪圖、layout 或 Dash 元件邏輯。
+**對應的 getter 函式：**
+
+| 函式 | 回傳 |
+|------|------|
+| `get_bundle(key)` | bundle dict 或 None |
+| `get_latest_key()` | 最新 key 字串或 None |
+| `get_land_range()` | `(beg, end)` tuple 或 None |
+| `get_typhoon_label()` | 字串或 None |
+| `get_typhoon_info()` | dict 或 None |
+| `get_thresholds_map()` | `{stid: dict|None}` 的 copy |
+| `get_cache_count()` | int |
+
+> **職責邊界**：本模組僅負責資料快取與線程調度，不涉及任何圖表渲染或 UI 佈局邏輯。
 
 ---
 
@@ -136,27 +160,39 @@ app.layout
 ├─ dcc.Store(id="figure-store")          # 備用，未來可擴充
 ├─ dcc.Store(id="stid-store")            # 當前 STID（SQL 產生用）
 ├─ dcc.Store(id="bundle-key-store")      # 最新 bundle key
+├─ dcc.Store(id="zoom-range-store")      # 水位圖目前 zoom x 範圍
 ├─ dcc.Interval(id="bundle-poll", 500ms) # 輪詢觸發器
 ├─ Header                                # 標題列
 ├─ 主內容
 │   ├─ 左：dcc.Graph(id="main-graph")   # 水位圖表（3/4 寬）
 │   └─ 右：QC 控制面板（1/4 寬）
-│       ├─ §A SQL 模式選擇（Mode 1 / 2）
+│       ├─ §0 Y軸範圍手動控制
+│       │     dcc.Input（上限/下限）+ 「套用」/「清除」按鈕
+│       │     套用後同步調整所有水位子圖的垂直範圍
+│       ├─ §A SQL 模式選擇（Mode 1 / 2 / 3）
 │       ├─ §B Mode 1 參數（新 QC 值輸入）
 │       ├─ §C Mode 2 參數（運算子 + 數值，預設隱藏）
 │       ├─ §D 框選資訊列
-│       └─ §E SQL 輸出（dcc.Textarea + dcc.Clipboard 複製鈕）
+│       ├─ §E SQL 輸出（dcc.Textarea + dcc.Clipboard 複製鈕）
+│       ├─ §F 匯出一般白底圖（water-export-btn + dcc.Download）
+│       └─ §G 匯出暴潮偏差圖（surge-export-btn + surge-export-status + dcc.Download）
 └─ 底部狀態列
+        └─ 顯示當前伺服器記憶體快取佔用狀態（例如：快取佔用：3 / 10）
 ```
 
 #### Callbacks
 
 | Callback | 觸發 | 作用 |
 |----------|------|------|
-| `toggle_mode_controls` | `qc-mode` RadioItems 變更 | 顯示/隱藏 Mode 1 或 Mode 2 參數區塊 |
+| `toggle_mode_controls` | `qc-mode` RadioItems 變更 | 顯示/隱藏 Mode 1 / 2 / 3 對應參數區塊 |
 | `poll_bundle` | `bundle-poll` Interval（每 500ms）| 從 `dash_bridge.get_latest_key()` 偵測新資料，有變化則更新 `bundle-key-store` |
-| `render_water_figure` | `bundle-key-store` 更新 | 從 `dash_bridge.get_bundle()` 取回 bundles，呼叫 `build_water_figure()`，更新 `main-graph` |
-| `on_selection` | `main-graph.selectedData` 變更 | 將 Box Select 範圍轉換為 `sel` dict，呼叫對應 SQL builder，結果寫入 `sql-output` |
+| `render_water_figure` | `bundle-key-store`、`zoom-range-store` 更新 | 從 `dash_bridge.get_bundle()` 取回 bundles，呼叫 `build_water_figure()`，更新 `main-graph` |
+| `capture_zoom` | `main-graph.relayoutData` | zoom / autorange 事件 → 更新 `zoom-range-store` |
+| `on_selection` | `main-graph.selectedData` 變更 | 將 Box Select 範圍轉換為 `sel` dict，依 Mode 1 / 2 / 3 呼叫對應 SQL builder，結果寫入 `sql-output` |
+| `apply_yaxis_range` | Y軸「套用」/「清除」按鈕 | Patch 所有水位子圖 yaxis 為手動輸入範圍，或還原自動縮放 |
+| `export_water_report` | `water-export-btn.n_clicks` | 呼叫 `build_water_report_figure()`（白底），同步畫面圖例顯示狀態與 zoom x 範圍，下載 PNG |
+| `export_surge_report` | `surge-export-btn.n_clicks` | 讀取 `typhoon_info` 與 `thresholds_map`，呼叫 `build_surge_report_figure()`；單站 → PNG，多站 → ZIP |
+| `export_vdc_report` | `vdc-export-btn.n_clicks` | 呼叫 `build_vdc_report_figure()`，下載 PNG |
 
 #### SQL 工具函式（獨立於 Tkinter）
 
@@ -165,6 +201,7 @@ app.layout
 | `_clean_ts(ts)` | 清理 Plotly 時間戳（`T`→空格、去毫秒），轉為 MySQL 可接受格式 |
 | `build_mode1_sql(sel, stid, new_qc)` | Mode 1：產生按時間範圍與 y 值範圍篩選的 `UPDATE tide6 SET QC=...` |
 | `build_mode2_sql_by_time(sel, stid, op, operand)` | Mode 2：從被框選點的展開 Time 反推 `DATATIME` 與 `MIN{N}` 欄位，產生 `MIN{N} = MIN{N} OP operand` |
+| `build_mode3_sql(t_start, t_end, bundle_key, typhoon_label)` | Mode 3：對所有已載入 bundles 計算暴潮統計值，產生 `INSERT INTO mrbank.surge` 語句 |
 | `_adapt_selected_data(selected_data)` | 將 Dash `selectedData` 格式轉換為 SQL builder 所需的 `sel` dict |
 
 ---
@@ -173,86 +210,119 @@ app.layout
 
 **角色：純函式水位圖繪製器（無副作用）**
 
-`build_water_figure(bundles, land_range=None) → go.Figure`
+從舊版 `draw_water_only()` 移植，移除了寫 temp HTML 與開啟瀏覽器的副作用，直接回傳 `go.Figure` 供 `dcc.Graph` 消費。
 
-從 `draw_water_only()` 移植而來，**移除**了寫 temp HTML 與開啟瀏覽器的副作用，改為直接回傳 `go.Figure` 供 `dcc.Graph` 消費。
+#### `build_water_figure()`（互動深色版）
+
+```python
+build_water_figure(
+    bundles: list,
+    land_range: tuple | None = None
+) -> go.Figure
+```
+
+| 參數 | 型別 | 說明 |
+|------|------|------|
+| `bundles` | `list[dict]` | `fetch_bundle()` 回傳值的清單，每個 bundle 含 `stid`、`stname`、`df`、`tide_meta` |
+| `land_range` | `tuple \| None` | 颱風陸上警報時段 `(beg, end)`，無則傳 `None` |
+
+**回傳：** `go.Figure`，可直接賦值給 `dcc.Graph(figure=...)`。`bundles` 為空時回傳帶說明文字的空白深色圖，不拋例外。
 
 #### 子圖結構
 
-每個 bundle 佔一列（`rows=n, cols=1`），共享 x 軸，雙 y 軸（左：水位，右：儀器差值）。
+每個 bundle 佔一列，`rows=n, cols=1`，`shared_xaxes=True`，`vertical_spacing=0.05`。每列為雙 y 軸（`secondary_y=True`），左軸水位、右軸儀器差值。
 
-#### 每列 Trace 說明
+#### 每列 Trace 繪製順序（§1～§5）
 
-| Trace | 樣式 | 說明 |
-|-------|------|------|
-| 校正值（QC=Q）| 藍色系實線/虛線 | 以 `WL_{stid}` 欄位繪製，`connectgaps=False` 讓缺值區間自然斷線 |
-| 低頻趨勢（25h MA）| 半透明灰線 | `WL_{stid}_lf`，預設 `visible="legendonly"` |
-| EWMA（α=0.05） | 半透明橘線 | `WL_{stid}_ewma`，預設隱藏 |
-| 原始機測值（QC≠Q） | 紅叉（`symbol="x"`）| `WL_{stid}_raw`，hover 顯示 QC 代碼 |
-| 1H 平滑輔助線 | 校正值色系，含 error bar | 預設隱藏，顯示均值 ± std |
-| 諧和預報（QC=h）| 綠色點線 | `WL_{p_stid}_pred_h` |
-| 天文潮（QC=a） | 淺綠色點線 | 預設隱藏 |
-| 儀器差值 | 橘/洋紅/青點狀 | `Diff_{A}_{B}` 欄位，右 y 軸 |
-| 颱風陸上警報色帶 | 紅色半透明 vrect | 由 `land_range` 控制 |
+**§1 各儀器水位（依 `tide_meta` 排序迭代）**
 
-#### `go.Scattergl` vs `go.Scatter` 說明
+| Trace | 欄位 | 樣式 | 預設顯示 |
+|-------|------|------|---------|
+| 校正值（QC=Q） | `WL_{stid}` | 藍色系實線（主站）/虛線（備用），`connectgaps=False` | ✅ |
+| 低頻趨勢（25h-MA） | `WL_{stid}_lf` | 半透明灰 `rgba(180,180,180,0.55)` | legendonly |
+| EWMA（α=0.05） | `WL_{stid}_ewma` | 半透明金黃 `rgba(255,200,100,0.7)`，`connectgaps=True` | legendonly |
+| 原始機測值（QC≠Q） | `WL_{stid}_raw` | 紅叉 `symbol="x" size=5`，hover 顯示 QC 代碼 | ✅ |
+| 1H 平滑輔助線 | `WL_{stid}`（重採樣） | 校正值同色，含標準差 error bar，時間戳往後推 30min 置中 | legendonly |
 
-原版使用 `Scattergl` 以提升大資料集 WebGL 效能。Dash 的 `selectedData`（Box Select）在部分平台對 `Scattergl` 回傳框選點資料不完整，但目前程式碼已改回 `Scattergl`（帶有 `# ← 從 Scatter 改回 Scattergl` 的行內注解）。若 QC 框選在特定環境失效，可嘗試改為 `go.Scatter` 並驗證。
+**§2 預報水位（僅主測站，`is_primary=1`）**
 
-#### 舊系統降級路徑
+| Trace | 欄位 | 樣式 | 預設顯示 |
+|-------|------|------|---------|
+| 諧和預報（QC=h） | `WL_{p_stid}_pred_h` | `#2ca02c` 綠色點線 | ✅ |
+| 天文潮預報（QC=a） | `WL_{p_stid}_pred_a` | `#98df8a` 淺綠點線 | legendonly |
 
-若 `fetch_tide_instruments()` 找不到 `stid_obs`，`fetch_bundle()` 回傳空 `tide_meta`。此時 `build_water_figure` 以舊版相容模式繪製（只有 `Obs` 和 `Pre` 兩欄），避免 KeyError 崩潰。
+**§3 儀器差值（右 y 軸）**
+
+掃描 `df.columns` 中所有 `Diff_` 前綴欄位，依序套用 `_DIFF_COLORS = ['#ff7f0e', '#e377c2', '#17becf']`，`mode="markers"`。
+
+**§4 颱風陸上警報色帶**
+
+`land_range` 不為 `None` 時，對當列加入紅色半透明 `vrect`（`fillcolor="Red", opacity=0.1`）。
+
+**§5 Y 軸標題**
+
+左軸「水位(mm)」，右軸「水位差值(mm)」（`showgrid=False`），兩軸 `fixedrange=False` 允許縮放。
+
+#### 全局 Layout
+
+```python
+template="plotly_dark"
+paper_bgcolor=plot_bgcolor="#1E1E1E"
+height=600 * n            # 每站 600px
+hovermode="x unified"
+uirevision=True           # ⚠️ 待辦：應改為動態版本號，見 §9
+rangeslider: 全部關閉     # fig.update_xaxes(rangeslider=dict(visible=False))
+```
+
+#### 舊系統降級路徑（`tide_meta` 為空時）
+
+`fetch_tide_instruments()` 找不到 `stid_obs` 時，`fetch_bundle()` 回傳空 `tide_meta`。此時只繪製 `Obs`（藍線）和 `Pre`（綠點線）兩欄，跳過 §1～§5 的新系統 trace，避免 `KeyError` 崩潰。
+
+#### `go.Scattergl` 注意事項
+
+目前所有 trace 均使用 `go.Scattergl`（WebGL 加速）。若在特定環境下 Box Select 的 `selectedData` 回傳點數為 0，可逐條改為 `go.Scatter` 排查，代價是大資料集渲染效能下降。（原始碼中以 `# ← 從 Scatter 改回 Scattergl` 標示已還原的位置。）
+
+#### `build_water_report_figure()`（白底靜態匯出版）
+
+```python
+build_water_report_figure(
+    bundles: list,
+    land_range: tuple | None = None,
+    zoom_range: dict | None = None,
+) -> go.Figure
+```
+
+與 `build_water_figure()` 邏輯相同，但套用白底報表樣式：
+
+- `template="plotly_white"`、`paper_bgcolor="white"`、`plot_bgcolor="white"`
+- 圖例、軸線、文字均調整為黑色系，適合簡報列印
+- `zoom_range` 不為 `None` 時，縮限 X 軸顯示範圍；Y 軸仍自動縮放（已知限制，見 §9）
+
+由 `export_water_report` callback 呼叫，同步畫面圖例的 visible 狀態（從 `main-graph.figure.data` 讀取各 trace 的 `visible` 欄位）。不同步 Y 軸範圍（同上已知限制）。
 
 ---
 
 ## 3. Tkinter 與 Dash 的資料流
 
-### 完整流程圖
+### 資料流向
 
-```
-使用者操作
-    │
-    ▼
-MainApp.go(mode="water")
-    │
-    ├─ [1] 讀取 UI 輸入：stids, start_date, end_date
-    ├─ [2] 防呆檢查：日期順序、時間跨度（≤365天）、測站數（≤45）
-    ├─ [3] 呼叫 fetch_bundle(stid, start, end) 取得 bundle dict
-    │       └─ bundle = {
-    │               stid, stname,
-    │               df,          ← 合併後時序資料（含 WL_*/WL_*_raw 欄位）
-    │               tide_meta,   ← {STID: {type, type_desc, stnac, is_primary}}
-    │               src_ids,     ← {p, w, wv, wt: 資料來源 STID}
-    │               src_names,   ← STID → 中文名稱
-    │               mr_full,     ← 全年平均潮差
-    │               mr_month,    ← 當月平均潮差
-    │          }
-    ├─ [4] 智慧過濾「幽靈颱風警報區」（time range 不重疊則 land_range=None）
-    ├─ [5] dash_bridge.set_bundle(key, bundles, land_range=current_lr)
-    │       ─── 寫入 _bundle_cache[key]，更新 _latest_key ───
-    └─ [6] webbrowser.open("http://127.0.0.1:{DASH_PORT}")
+**Tkinter → Dash（單向推送）：**
+- `MainApp` 查詢到資料（`bundle`）後，呼叫 `dash_bridge.set_bundle(key, bundle)` 將資料存入共用快取。
+- `dash_app.py` 中的 `dcc.Interval` 定期輪詢 `dash_bridge.get_latest_key()`。
+- 當 `key` 更新時，觸發 Dash callback（`render_figure`）從 `dash_bridge.get_bundle(key)` 讀取資料並更新圖表。
 
-  ↓（500ms 後）
+**獨立分頁（Session Isolation）：**
+- 透過 URL 參數實作：`http://127.0.0.1:8050/?key={stid}_{timestamp}`。
+- **優點**：每個開啟的瀏覽器分頁都「鎖定」在特定的查詢結果上，不會因為 Tkinter 發起新查詢而強制跳轉。這允許使用者同時開啟多個分頁進行測站對照。
+- **Fallback 機制**：若 URL 無參數，則 Dash 會透過 `dcc.Interval` 輪詢並顯示最新的一筆查詢結果。
 
-Dash callback: poll_bundle（每 500ms）
-    ├─ dash_bridge.get_latest_key()  →  取得最新 key
-    ├─ 若 key 與 bundle-key-store 中的值不同
-    └─ 更新 bundle-key-store
+**Tkinter → Dash 操作流程：**
+- `MainApp` 查詢完成後，產生唯一 Key 並呼叫 `dash_bridge.set_bundle`。
+- 同時透過 `webbrowser.open` 打開帶有 Key 參數的網址。
 
-  ↓（bundle-key-store 變化觸發）
-
-Dash callback: render_water_figure
-    ├─ dash_bridge.get_bundle(key)   →  取回 bundles
-    ├─ dash_bridge.get_land_range()  →  取回 land_range
-    └─ build_water_figure(bundles, land_range)  →  go.Figure
-       → 更新 main-graph
-```
-
-### 執行緒安全保證
-
-- `set_bundle` / `get_bundle` / `get_latest_key` / `get_land_range` 均以 `threading.Lock` 包覆
-- Dash callback 執行緒只讀取快取，不寫入；Tkinter 主執行緒只寫入，不讀取
-- `key` 格式為 `{stid}_{timestamp}`，確保同一測站的多次查詢不會被舊快取覆蓋誤用
+**Dash → Tkinter（間接）：**
+- Dash 應用程式本身不直接回傳資料給 Tkinter。
+- Dash 負責顯示圖表和生成 SQL。生成的 SQL 語句由使用者手動複製。
 
 ### 埠號動態分配
 
@@ -306,6 +376,7 @@ WHERE  STID     = '{stid}'
 ### Mode 2：MIN 欄位四則運算
 
 **適用場景：** 精確修正特定展開時間點的 MIN 值（例如儀器系統偏移、單位換算錯誤）。
+> ⚠️ **注意：** 目前此模式僅支援 `tide6` 資料表，不適用於 `wind`、`stemp6` 等其他資料表。
 
 **反推邏輯：**
 
@@ -315,17 +386,58 @@ Time.minute // 6 = N
 DATATIME = Time.replace(minute=0, second=0)
 ```
 
-**產生的 SQL（每個 DATATIME 一條）：**
+**產生的 SQL（按指令合併優化）：**
 
 ```sql
 UPDATE tide6
-SET    MIN3 = MIN3 + 0.5
+SET    MIN3 = MIN3 + 0.5,
+       MIN4 = MIN4 + 0.5
 WHERE  STID     = '{stid}'
-  AND  DATATIME = '2024-07-15 14:00:00';
+  AND  DATATIME IN ('2024-07-15 14:00:00', '2024-07-15 15:00:00', ...);
 ```
 
 - 多個被框選的 Time 若屬同一 DATATIME，則合併為同一條 UPDATE（SET 多欄）
 - 標頭注解說明共有幾筆 DATATIME、幾個欄位、使用何種運算
+- **SQL 語法優化（IN 子句）**：對於 Mode 2，系統會自動歸類具有相同修改指令（SET 內容相同）的時間點，並合併為 `WHERE DATATIME IN ('...', '...')` 格式，大幅減少 SQL 筆數並提升執行效率。
+
+### Mode 3：生成暴潮紀錄 INSERT SQL
+
+**適用場景：** 颱風事件結束後，對所有已載入測站批量產生暴潮統計資料的 INSERT 語句，供人工審核後寫入 `mrbank.surge`。
+
+**觸發方式：** 在 Dash 右側面板選擇 Mode 3 後，以 Box Select 框選目標時間範圍（或不框選使用全時段），SQL 即自動產生。
+
+**計算邏輯（`build_mode3_sql()` 函式）：**
+
+- 從 box select 的 x 範圍（`t_start` / `t_end`）決定計算窗口；若無框選則使用全時段
+- 對每個已載入 bundle，計算框選窗口內的：
+
+| 欄位 | 計算方式 |
+|------|---------|
+| `MAXRISE` | 觀測水位（`WL_{stid}`）最大值（mm） |
+| `MAXRISET` | 發生 `MAXRISE` 的時間戳 |
+| `MAXDEV` | 暴潮偏差（優先使用 `Resi`，即 Obs − pred_h）最大值（mm） |
+| `MAXDEVT` | 發生 `MAXDEV` 的時間戳 |
+| `MAXNEG` | 暴潮偏差最小值（mm，負向最大偏差） |
+| `MAXNEGT` | 發生 `MAXNEG` 的時間戳 |
+| `CNAME` / `ID` | 從 `typhoon_label`（如 `丹娜絲(2504L)`）解析 |
+
+**產生的 SQL（每站一條 INSERT）：**
+
+```sql
+-- 測站 1176 丹娜絲(2504L)
+INSERT INTO mrbank.surge
+(ID, STID, MAXRISE, MAXRISET, MAXDEV, MAXDEVT, MAXNEG, MAXNEGT,
+ QC, CNAME, KIND, PATH, INTENSITY, SPRING, PRES, VC, R7)
+VALUES (
+  '2504L', '1176', 2350, '2025-07-24 03:00:00',
+  890, '2025-07-24 03:12:00', -120, '2025-07-23 22:00:00',
+  'a', '丹娜絲', NULL, NULL, NULL, NULL, NULL, NULL, NULL
+);
+```
+
+- `QC='a'`（自動計算，待人工核閱後依實際情況調整）
+- `KIND`、`PATH`、`INTENSITY`、`SPRING`、`PRES`、`VC`、`R7` 固定輸出 NULL，需人工填寫
+- 多站時各站 INSERT 以兩個換行分隔
 
 ### `stid-store` 的更新時機
 
@@ -361,57 +473,46 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 
 此行已加入所有讀取 `tide6`、`stemp6`、`stemp1` 的程式碼段後。
 
+> 完整資料表欄位定義請參閱 SYSTEM.md §十。
+
 ---
+
 ## 6. 視覺規範與樣式定義 (Visual Standards)
 
-  本系統採用 Dark Mode 視覺風格，針對長時間監控需求設計，並針對 Windows 環境下的中文字體顯示進行優化。
+本系統採用 Dark Mode 視覺風格，針對長時間監控需求設計，並針對 Windows 環境下的中文字體顯示進行優化。
 
-  a. 核心配色表 (Color Palette)
-  ┌──────────────────────┬────────────────────────┬────────────────────────────────┐
-  │ 項目                 │ HEX 色碼               │ 視覺用途                       │
-  ├──────────────────────┼────────────────────────┼────────────────────────────────┤
-  │ Global Background    │ #111820                │ 系統底色、下拉選單、狀態列背景 │
-  │ Plot/Text Background │ #1E1E1E                │ 圖表繪圖區背景、SQL 輸出區背景 │
-  │ Panel Background     │ #1E2A3A                │ 右側 QC 控制面板背景           │
-  │ Header/Accent        │ #1A3A5C                │ 頂部標題列、區塊標題底色       │
-  │ Border/Highlight     │ rgba(200,214,229,0.25) │ 邊框、格線、半透明強調色       │
-  │ Primary Text         │ #CCD0D4                │ 一般標籤與選單文字色           │
-  └──────────────────────┴────────────────────────┴────────────────────────────────┘
+**a. 核心配色表 (Color Palette)**
 
-  b. 字體系統 (Typography)
-  為確保在 Windows 等寬環境下 SQL 指令與測站清單能精確對齊，優先選用「標楷體」。
-   * UI 字體：標楷體, Noto Sans TC, Segoe UI, Arial, sans-serif
-   * 等寬字體：標楷體, Courier New, Consolas, monospace (應用於 SQL 輸出、測站代碼對齊)
-   * 圖表字體：標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif
+```
+┌──────────────────────┬────────────────────────┬────────────────────────────────┐
+│ 項目                 │ HEX 色碼               │ 視覺用途                       │
+├──────────────────────┼────────────────────────┼────────────────────────────────┤
+│ Global Background    │ #111820                │ 系統底色、下拉選單、狀態列背景 │
+│ Plot/Text Background │ #1E1E1E                │ 圖表繪圖區背景、SQL 輸出區背景 │
+│ Panel Background     │ #1E2A3A                │ 右側 QC 控制面板背景           │
+│ Header/Accent        │ #1A3A5C                │ 頂部標題列、區塊標題底色       │
+│ Border/Highlight     │ rgba(200,214,229,0.25) │ 邊框、格線、半透明強調色       │
+│ Primary Text         │ #CCD0D4                │ 一般標籤與選單文字色           │
+└──────────────────────┴────────────────────────┴────────────────────────────────┘
+```
 
-  c. 圖表組件規範 (Plotly Styles)
-   * 範本 (Template)：統一套用 plotly_dark。
-   * 交互模式：hovermode='x unified' (十字準星) 且 uirevision=True (鎖定縮放視圖)。
-   * CSS 覆蓋：透過 assets/custom.css 強制修正 Dash Dropdown 預設亮色樣式，確保選單背景為 #111820 並具備懸停高亮效果。
+**b. 字體系統 (Typography)**
 
-  ---
+為確保在 Windows 等寬環境下 SQL 指令與測站清單能精確對齊，優先選用「標楷體」。
 
-## 7. 系統微調與更新紀錄 (2026-05-12)
+- UI 字體：標楷體, Noto Sans TC, Segoe UI, Arial, sans-serif
+- 等寬字體：標楷體, Courier New, Consolas, monospace（應用於 SQL 輸出、測站代碼對齊）
+- 圖表字體：標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif
 
-  本章節紀錄 2026 年 5 月期間針對系統穩定性、視覺體驗及操作效率所做的微調優化。
+**c. 圖表組件規範 (Plotly Styles)**
 
-  1. UI/UX 增強
-   * Y 軸範圍手動控制：於 Dash 右側面板新增 §0 區塊，支援手動輸入水位上限與下限。點擊「套用」後可同步調整所有水位子圖的垂直範圍，方便排除極端雜訊。
-   * SQL 複製優化：在 SQL 輸出區右上方整合 dcc.Clipboard 按鈕，點擊即可一鍵複製生成的 UPDATE 指令，不需手動框選文字。
-
-  2. 測站清單管理 (Tkinter)
-   * 動態活站篩選 (Dynamic Filter)：新增「只列有資料站」按鈕。系統會根據當前選擇的時間範圍，即時查詢 tide6 資料表，僅保留有觀測紀錄的測站，節省無效查詢時間。
-   * 單位快速選取：新增「選氣象署」與「非氣象署」按鈕。依據 sponsor_map 對應之業務單位執行批次勾選動作，方便處理不同權責來源的資料。
-
-  3. 數據與繪圖邏輯升級
-   * 多儀器自動識別：支援同地點「音波、壓力、雷達」多台水位儀器自動併圖顯示，並自動計算主/備儀器間的差值 (Diff) 顯示於右側 Y 軸。
-   * 新增趨勢線 (EWMA)：引入指數加權移動平均線 (alpha=0.05)，相較於傳統移動平均線更能即時反應變動且減少邊界缺點，預設於圖例中隱藏。
-   * 天文潮支援 (QC='a')：資料查詢路徑新增對 tide6ha 中 QC='a' (天文潮重建) 欄位的支援，提供多維度的預報比對。
-   * Error Bar 平滑輔助線：在「水位細節」模式中提供 1H 平均值線，並附帶標準差誤差棒，輔助判斷資料離散程度。
+- 範本 (Template)：統一套用 `plotly_dark`
+- 交互模式：`hovermode='x unified'`（十字準星）且 `uirevision=True`（鎖定縮放視圖）
+- CSS 覆蓋：透過 `assets/custom.css` 強制修正 Dash Dropdown 預設亮色樣式，確保選單背景為 `#111820` 並具備懸停高亮效果
 
 ---
 
-## 8. VdC 散佈圖模組（2026-05-25）
+## 7. VdC 散佈圖模組（2026-05-25）
 
 ### 新增檔案：`build_vdc_figure.py`
 
@@ -431,12 +532,12 @@ build_vdc_figure(
 - `"雷達式"` / `"壓力式"`：強制指定，找不到時子圖顯示提示訊息
 
 **X 軸範圍：各站獨立，mean ± 3σ**
-每站以自身差值序列計算 `x_half = max(|mean| + 3×std, 1.0)`，套用於該子圖。
-使用者可透過 UI 手動覆蓋為統一對稱範圍（見 C 方案 callback）。
+
+每站以自身差值序列計算 `x_half = max(|mean| + 3×std, 1.0)`，套用於該子圖。使用者可透過 UI 手動覆蓋為統一對稱範圍（見 C 方案 callback）。
 
 **回歸線：**
-使用 `scipy.stats.linregress(WL, diff)` 計算，在 VdC 圖上疊加淡藍色虛線。
-斜率（a）與 R² 同步存入 `stats_summary` 並顯示於右側面板。
+
+使用 `scipy.stats.linregress(WL, diff)` 計算，在 VdC 圖上疊加淡藍色虛線。斜率（a）與 R² 同步存入 `stats_summary` 並顯示於右側面板。
 
 **回傳 stats_summary 結構：**
 ```python
@@ -455,8 +556,8 @@ build_vdc_figure(
 ```
 
 **時間篩選（zoom 聯動）：**
-`zoom_range` 不為 None 時，各站 `sub_df` 在 `dropna()` 後以
-`t0 ≤ Time ≤ t1` 過濾，實現水位時序圖 zoom → VdC 自動重繪。
+
+`zoom_range` 不為 None 時，各站 `sub_df` 在 `dropna()` 後以 `t0 ≤ Time ≤ t1` 過濾，實現水位時序圖 zoom → VdC 自動重繪。
 
 ---
 
@@ -473,6 +574,7 @@ build_vdc_figure(
 | `apply_vdc_x_range` | `vdc-x-apply-btn` / `vdc-x-clear-btn` | Patch 所有 VdC 子圖 xaxis 為統一對稱範圍或還原自動 |
 
 **`render_figure` 新增 Input：**
+
 `zoom-range-store` 加為 Input，切換 tab 或 zoom 後自動重繪 VdC。
 
 **VdC Tab 新增 UI 元素：**
@@ -488,8 +590,9 @@ build_vdc_figure(
 
 | 優先度 | 項目 |
 |--------|------|
-| ✅ 完成 | 匯出報表功能：點擊按鈕產生 VdC + 差值直方圖雙欄 PNG |
+| 🔵 追蹤 | （無待辦） |
 
+---
 
 ### 匯出 PNG 報表功能（2026-05）
 
@@ -501,8 +604,7 @@ build_vdc_figure(
 
 **檔名格式：** `VdC_report_YYYYMMDD.png`
 
-**相依套件：** `kaleido`（Plotly 靜態圖片匯出後端）；建議版本 0.2.1，安裝指令：
-pip install kaleido==0.2.1
+**相依套件：** `kaleido`（Plotly 靜態圖片匯出後端）。測試環境實裝版本為 `1.2.0`，運作正常。原始建議版本為 `0.2.1`，兩者 API 相容，受限環境無法安裝新版可降版測試。
 
 **新增函式：`build_vdc_report_figure()`**
 
@@ -538,6 +640,162 @@ build_vdc_report_figure(
 
 ---
 
+## 8. 暴潮偏差報表圖模組（2026-08）
+
+### 新增檔案：`build_surge_report_figure.py`
+
+**職責：** 純函式繪圖模組，輸入單站 bundle、颱風資訊、門檻值，產出適合簡報列印的白底暴潮偏差 PNG。
+
+---
+
+### 輔助函式：`get_tsuwawa_thresholds()`
+
+```python
+get_tsuwawa_thresholds(
+    conn,        # mysql.connector 連線物件
+    stid: str,
+) -> dict | None
+```
+
+查詢 `tsuwawa.warn` 表，取得指定測站的大潮警戒（`WARNVAL`）與注意（`STIDE`）水位門檻。
+
+**回傳格式（單位 mm）：**
+```python
+{
+    "警戒值_mm": float,   # WARNVAL × 1000（原始單位為 m）
+    "注意值_mm": float,   # STIDE × 1000
+}
+```
+
+查無資料時回傳 `None`。圖上相應警戒線不繪製，不拋例外。
+
+---
+
+### 主函式：`build_surge_report_figure()`
+
+```python
+build_surge_report_figure(
+    bundle: dict,
+    typhoon_info: dict,
+    thresholds: dict | None,
+) -> go.Figure
+```
+
+| 參數 | 型別 | 說明 |
+|------|------|------|
+| `bundle` | `dict` | `fetch_bundle()` 回傳的單站 bundle |
+| `typhoon_info` | `dict` | 颱風事件資訊（`id`, `cname`, `warnSeaBeg`, `warnSeaEnd`, `warnLandBeg`, `warnLandEnd`） |
+| `thresholds` | `dict \| None` | `get_tsuwawa_thresholds()` 的回傳值；`None` 時不繪製警戒線 |
+
+**回傳：** `go.Figure`（白底，單站單面板，雙 y 軸）。
+
+#### 圖表設計
+
+**背景與樣式：**
+- `template="plotly_white"`（或手動設 `paper_bgcolor="white"` / `plot_bgcolor="white"`）
+- 字型：Microsoft JhengHei（安內環境有此字型，確保標題中文不亂碼）
+- 輸出尺寸：`width=1400, height=500, scale=2`
+
+**標題格式（兩行置中）：**
+```
+{cname}（{id}）暴潮偏差分析
+測站：{stid_display}（舊站碼 {stid_obs} / 新站碼 {stid_new}）
+```
+`stid_obs` 與 `stid_new` 從 `bundle['tide_meta']` 的主站 meta 取得（需 `query_multi_tide_data` 已將這兩個欄位寫入 tide_meta）。
+
+**Trace 設計（左 y 軸：水位 mm；右 y 軸：暴潮偏差 mm）：**
+
+| Trace | 欄位 | 樣式 | y 軸 |
+|-------|------|------|------|
+| 觀測水位（QC=Q） | `WL_{primary_stid}` | 藍色實線 | 左 |
+| 諧和預報（QC=h） | `WL_{primary_stid}_pred_h` | 深綠點線 | 左 |
+| 高潮位標記 | 局部極大值三角形 ▲ | `#ff7f0e` 橘色，默認 legendonly | 左 |
+| 低潮位標記 | 局部極小值三角形 ▽ | `#9467bd` 紫色，默認 legendonly | 左 |
+| 暴潮偏差（Resi） | `Resi` = WL − pred_h | `#e74c3c` 紅色實線 | 右 |
+
+**警戒門檻線（左 y 軸，水平 hline）：**
+
+| 線 | 值 | 樣式 |
+|----|-----|------|
+| 大潮警戒值 | `thresholds["警戒值_mm"]` | 深橘色 `#e67e22`，dash，寬 1.5 |
+| 大潮注意值 | `thresholds["注意值_mm"]` | 琥珀色 `#f39c12`，dash，寬 1.5 |
+
+`thresholds` 為 `None` 時跳過，不拋例外。
+
+**警報時段色帶（vrect）：**
+
+| 色帶 | 時間範圍 | 顏色 |
+|------|---------|------|
+| 海上警報（海警） | `warnSeaBeg` ～ `warnSeaEnd` | 淡藍 `rgba(100,149,237,0.15)` |
+| 陸上警報（陸警） | `warnLandBeg` ～ `warnLandEnd` | 淡橘紅 `rgba(255,100,50,0.12)` |
+
+警報時間為 `None` 時（未選颱風或無該類警報）跳過對應 vrect。
+
+**警報區標注（annotation）：**
+- 海警時段於圖頂 `y=1.09` 位置標記文字「⚓ 海上警報」
+- 陸警時段於 `y=1.03` 位置標記文字「🏠 陸上警報」
+
+---
+
+### 兩種呼叫路徑
+
+#### 路徑 A：Tkinter `mode="storm"`（本機儲存）
+
+在 `MainApp.go(mode="storm")` 中觸發：
+
+1. 僅支援單站（多站查詢時自動取第一站，並顯示提示）
+2. 解析 `self.ty_cb.get()` 取颱風資訊；若未選颱風則以「未指定颱風」填充 dict
+3. 呼叫 `get_tsuwawa_thresholds(self.e.conn, stid)` 取門檻值
+4. 呼叫 `build_surge_report_figure(bundle, typhoon_info, thresholds)`
+5. 輸出至 `{BASE_DIR}/surge_reports/surge_{stid}_{ty_id}_{YYYYMMDD}.png`
+6. `os.startfile()` 開啟圖檔，`messagebox.showinfo()` 顯示路徑
+
+#### 路徑 B：Dash `export_surge_report` callback（瀏覽器下載）
+
+按鈕位置：水位 tab 右側 QC 面板 §G「🌊 匯出暴潮偏差圖 PNG」。
+
+| 項目 | 值 |
+|------|-----|
+| Output | `surge-download.data`、`surge-export-status.children` |
+| Input | `surge-export-btn.n_clicks` |
+| State | `bundle-key-store` |
+| 資料來源 | `dash_bridge.get_typhoon_info()`、`dash_bridge.get_thresholds_map()` |
+
+**多站處理（ZIP）：**
+- 單站 → 下載 `Surge_{stid}_{timestamp}.png`
+- 多站 → 對每站各自生成 PNG，打包為 `Surge_{ty_id}_{timestamp}.zip`（`zipfile.ZIP_DEFLATED`）
+
+**錯誤處理：**
+- `typhoon_info` 為 `None`（未選颱風即按水位模式查詢）→ `surge-export-status` 顯示警告，不觸發下載
+- `thresholds_map` 不含某站 → 對該站傳入 `None`，圖上不顯示警戒線（不中止整批匯出）
+
+---
+
+### dash_bridge.py 新增欄位
+
+| 欄位 | 型別 | 傳入時機 | 對應 getter |
+|------|------|---------|------------|
+| `_typhoon_info` | `dict \| None` | `go(mode="water")` 且有颱風選取時 | `get_typhoon_info()` |
+| `_thresholds_map` | `dict` | `go(mode="water")` 同步查詢各站門檻值 | `get_thresholds_map()` |
+
+`set_bundle()` 簽名對應更新：
+
+```python
+def set_bundle(key, bundle, land_range=None, typhoon_label=None,
+               typhoon_info=None, thresholds_map=None) -> None
+```
+
+---
+
+### 設計決策記錄
+
+| 決策 | 結論 | 理由 |
+|------|------|------|
+| 暴潮偏差圖是否跟隨水位圖 zoom 範圍 | **不跟隨（設計決策）** | 颱風報告需呈現完整事件期間，局部裁切會導致海陸警色帶不完整，誤導判讀 |
+| PNG 匯出是否同步 Y 軸手動範圍 | **不同步（已知限制）** | Y 軸 Patch 寫入後無法從 figure dict 直接反查範圍；對簡報用途影響小，列入限制記錄 |
+
+---
+
 ## 9. 已知限制與待辦事項
 
 ### 功能面
@@ -549,6 +807,7 @@ build_vdc_report_figure(
 | 🟡 中 | `draw_diagnostic` QC 框選失效 | 全參數模式（mode="full"）仍以舊 HTML 路徑輸出，QC 框選功能不可用 |
 | 🟡 中 | 多測站 bundle 的 STID 切換 | 同時查詢多測站時，QC 面板的 STID 未提供切換 UI，只使用第一筆 |
 | 🟡 中 | 溫度顏色與紅叉衝突 | 氣溫（深紅）和海溫（淺粉）色系與 QC 紅叉視覺上相近，建議遷移至橘棕色系（`#e6740a` / `#ffbb78`）|
+| 🟡 中 | PNG 匯出 Y 軸範圍未同步 | 手動調整的 Y 軸範圍或 zoom in 縮放均不會反映在匯出的白底 PNG 中；X 軸 zoom 範圍有同步（見 §2.4）。修正需從 figure dict 反查 layout.yaxis 範圍，複雜度偏高，暫不修正 |
 | 🟢 低 | `uirevision` 應為動態版本號 | 目前固定為 `True`，多次 push 新資料後縮放狀態可能不正確重置 |
 | 🟢 低 | `DEBUG print` 未清除 | `query_multi_tide_data` 內有多行 `print("[DEBUG]...")` 尚未移除 |
 | 🟢 低 | `bundle-poll` 500ms 效率 | 若 Dash 與 Tkinter 在同機執行，可縮短至 250ms；未來可改以 websocket 推送取代輪詢 |
@@ -578,6 +837,51 @@ pyinstaller --collect-all mysql.connector ...
 ```
 
 `mysql.connector` 在執行時會動態載入語系檔（locale files）與驅動模組，`--hidden-import` 只能處理靜態 import，**無法涵蓋這些執行期資源**，打包後連線失敗時會因語系檔缺失觸發次生錯誤。
+
+<!-- ### `--onefile` → `--onedir`：解決安內首次啟動極慢問題（2026-07）
+
+**部署鏈澄清**：本專案在安外 Windows 開發機（.183，Python 3.13）打包成 `.exe`，
+移動到安內 Windows PC（.142，無法安裝 Python）執行，串接安內資料庫（.71）。
+`.142` 是使用者實際雙擊執行的機器，也是本節效能問題的觀測點。
+
+**症狀**：`--onefile` 打包版本在 .142 上雙擊執行後，登入畫面需等待約 **30 秒**才出現
+（實測值），後續操作皆流暢。等待期間容易讓人誤判為滑鼠沒點到、軟體當機或電腦當機。
+
+**成因**：`--onefile` 每次執行都會先將整個打包內容解壓縮到系統 temp 資料夾，
+再從 temp 執行。本專案疊了 dash + plotly + pandas + numpy + scipy + mysql-connector
++ babel，解壓縮體積大（`--onedir` 攤開後約 383MB），因此每次啟動都要重複付出這段
+解壓時間。
+
+**修正**：`build.bat` 將 `--onefile` 改為 `--onedir`：
+
+```diff
+- python -m PyInstaller --noconfirm --onefile --windowed --name ocean_plot_dash ...
++ python -m PyInstaller --noconfirm --onedir --windowed --name ocean_plot_dash ...
+```
+
+其餘所有 `--hidden-import` 與 `--collect-all babel` / `--collect-all mysql.connector`
+**保持不變**——這些是解決 Dash/Babel/mysql.connector 執行期問題的必要項，與啟動速度
+無關，不可因瘦身而移除，否則可能重現次生錯誤（見下節）。
+
+**實測效果**：首次啟動時間由 **30 秒降至 4 秒**。建置（打包）耗時本身兩者理論上相近
+（`--onefile` 只是多一道「壓縮為單一 exe」的最後步驟，理論上應略久於 `--onedir`）；
+若實測感覺 `--onedir` 建置反而明顯較久，優先檢查建置機（.183）的防毒軟體是否對
+`build/`、`dist/` 產生的大量小檔案做即時掃描，而非模式本身的問題。
+
+**部署方式變更**：
+- 舊：部署單一 `ocean_plot_dash.exe`
+- 新：`dist/ocean_plot_dash/` 整個資料夾需壓縮為 `.zip` ；於 .142 解壓縮後
+  雙擊資料夾內的 `.exe` 執行。**`.exe` 不可單獨移出資料夾**，需與旁邊的 `.dll`／
+  子資料夾放在一起。
+- **`.142` 資安限制**：不建議安裝第三方解壓縮工具（如 7-Zip），需用系統內建方式解壓，
+  例如以系統管理員權限開啟 PowerShell 執行 `Expand-Archive`。
+
+**`--onefile` 是否仍有保留價值？** 唯一優勢是「使用者只看到單一檔案」，但本專案的
+部署流程本來就需要解壓縮 `.zip`，這項優勢在實際交付流程中並不成立；且啟動時間差距
+（30 秒 vs 4 秒）的使用者體驗成本遠高於檔案外觀整潔與否，故正式改採 `--onedir`。
+
+**建置快取建議**：每次重新打包前建議先清空專案下的 `build/` 與 `dist/` 目錄再執行，
+避免沿用舊版分析快取。 -->
 
 ### 次生錯誤症狀與誤導風險
 
@@ -609,4 +913,4 @@ except Exception as e:
 
 ---
 
-*本文件依 ocean_plot_dash.py、dash_bridge.py、dash_app.py、build_water_figure.py 四個檔案原始碼撰寫，如有修改請同步更新。*
+*本文件依 ocean_plot_dash.py、dash_bridge.py、dash_app.py、build_water_figure.py、build_vdc_figure.py、build_surge_report_figure.py 六個檔案原始碼撰寫，如有修改請同步更新。*
