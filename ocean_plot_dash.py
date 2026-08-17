@@ -71,6 +71,104 @@ elif OS_TYPE == "Darwin": # macOS
 else: # Linux
     UI_FONT = "Noto Sans CJK TC" # Linux 常見支援的開源中文字體
 
+# ── Dark Navy 色彩系統（對齊 Dash 配色）─────────────────────
+_C = {
+    "bg":       "#111820",   # 主背景
+    "panel":    "#1E2A3A",   # 輸入框、面板
+    "header":   "#1A3A5C",   # 標題列、按鈕底色
+    "border":   "#2a4060",   # 邊框
+    "text":     "#CCD0D4",   # 主要文字
+    "text_dim": "#8ab0cc",   # 標籤、次要說明
+    "accent":   "#a8d0f0",   # 按鈕文字、強調色
+    "cursor":   "#5ba3d9",   # 輸入游標
+    "sel_bg":   "#1A3A5C",   # 選取背景
+    "sel_fg":   "#a8d0f0",   # 選取文字
+}
+
+def _apply_dark_theme(root):
+    """套用 Dark Navy 主題；在 root 視窗建立後、任何 widget 建立前呼叫。"""
+    root.configure(bg=_C["bg"])
+
+    # ── Combobox 展開時的下拉清單（tk.Listbox，ttk.Style 管不到）
+    root.option_add("*TCombobox*Listbox.background",       _C["panel"])
+    root.option_add("*TCombobox*Listbox.foreground",       _C["text"])
+    root.option_add("*TCombobox*Listbox.selectBackground", _C["sel_bg"])
+    root.option_add("*TCombobox*Listbox.selectForeground", _C["sel_fg"])
+
+    # ← 新增這四行：所有獨立的 tk.Listbox
+    root.option_add("*Listbox.background",        _C["panel"])
+    root.option_add("*Listbox.foreground",        _C["text"])
+    root.option_add("*Listbox.selectBackground",  _C["sel_bg"])
+    root.option_add("*Listbox.selectForeground",  _C["sel_fg"])
+    root.option_add("*Listbox.highlightThickness", 0)
+    root.option_add("*Listbox.borderWidth",        0)
+
+    # tk（非 ttk）元件的全域預設色
+    root.option_add("*Label.background",      _C["bg"])
+    root.option_add("*Label.foreground",      _C["text"])
+    root.option_add("*Frame.background",      _C["bg"])
+    root.option_add("*LabelFrame.background", _C["bg"])
+    root.option_add("*LabelFrame.foreground", _C["text_dim"])
+
+    # 覆蓋「切換至 Localhost 測試模式」的灰底
+    root.option_add("*Checkbutton.background",       _C["bg"])
+    root.option_add("*Checkbutton.foreground",       _C["text"])
+    root.option_add("*Checkbutton.activeBackground", _C["bg"])
+    root.option_add("*Checkbutton.activeForeground", _C["accent"])
+    root.option_add("*Checkbutton.selectColor",      _C["panel"])
+
+    s = ttk.Style()
+    s.theme_use("clam")          # clam 才允許完整覆寫顏色
+
+    s.configure("TFrame",      background=_C["bg"])
+    s.configure("TLabel",      background=_C["bg"],    foreground=_C["text"])
+    s.configure("TLabelframe", background=_C["bg"],    foreground=_C["text_dim"],
+                               bordercolor=_C["border"])
+    s.configure("TLabelframe.Label", background=_C["bg"], foreground=_C["text_dim"])
+
+    s.configure("TEntry",
+                fieldbackground=_C["panel"], foreground=_C["text"],
+                insertcolor=_C["cursor"],    bordercolor=_C["border"],
+                lightcolor=_C["border"],     darkcolor=_C["border"])
+    s.map("TEntry",
+          fieldbackground=[("focus", _C["panel"])],
+          bordercolor=[("focus", _C["cursor"])])
+
+    s.configure("TButton",
+                background=_C["header"], foreground=_C["accent"],
+                bordercolor=_C["border"],
+                font=("Microsoft JhengHei", 10, "bold"))
+    s.map("TButton",
+          background=[("active", _C["border"]), ("pressed", "#0d2a48")],
+          foreground=[("active", "#ffffff")])
+
+    s.configure("TCombobox",
+                fieldbackground=_C["panel"], background=_C["panel"],
+                foreground=_C["text"],       arrowcolor=_C["text_dim"],
+                bordercolor=_C["border"],
+                selectbackground=_C["sel_bg"], selectforeground=_C["sel_fg"])
+    # s.map("TCombobox",
+    #       fieldbackground=[("readonly", _C["panel"])],
+    #       foreground    =[("readonly", _C["text"])])
+    # 試圖覆蓋颱風選單的灰底
+    s.map("TCombobox",
+      fieldbackground=[("readonly", _C["panel"]),
+                       ("!readonly", _C["panel"]),
+                       ("disabled", _C["bg"])],
+      background     =[("readonly", _C["panel"]),
+                       ("active",   _C["panel"])],
+      foreground     =[("readonly", _C["text"]),
+                       ("disabled", _C["text_dim"])])
+
+    s.configure("TCheckbutton",
+                background=_C["bg"], foreground=_C["text"],
+                indicatorcolor=_C["panel"])
+    s.configure("TRadiobutton", background=_C["bg"], foreground=_C["text"])
+
+    s.configure("TScrollbar",
+                background=_C["panel"], troughcolor=_C["bg"],
+                arrowcolor=_C["text_dim"], bordercolor=_C["border"])
+
 class OceanDataEngine:
     def __init__(self, password, host=DB_IP, user=DB_USER, database='mrbank', tables=None):
         try:
@@ -129,7 +227,10 @@ class OceanDataEngine:
             # --- [核心修改 3] 動態替換颱風資料庫名稱 ---
             query = f"SELECT DISTINCT LEFT(id, 2) as yr FROM {self.typhoon_db}.typhoonid WHERE sponsor='LocalTime' ORDER BY yr DESC"
             df = pd.read_sql(query, self.conn)
-            return [f"20{y}" for y in df['yr']]
+            # return [f"20{y}" for y in df['yr']]
+            # return [f"19{y}" if int(y) >= 50 else f"20{y}" for y in df['yr']]
+            years = [f"19{y}" if int(y) >= 50 else f"20{y}" for y in df['yr']]
+            return sorted(years, reverse=True)
         except Exception: return []
 
     def fetch_typhoons(self, yr_full):
@@ -1476,6 +1577,7 @@ def draw_water_only(bundles, land_range=None):
 class LoginWin:
     def __init__(self):
         self.root = tk.Tk(); self.root.title("系統登入"); self.root.geometry("330x230")
+        _apply_dark_theme(self.root)
         # self.root.option_add('*Font', 'UI_FONT 12') #這是原本claude寫的，gemini code一直建議改成下面那行
         self.root.option_add('*Font', f'{UI_FONT} 12')
         tk.Label(self.root, text="海洋動力診斷儀表板", font=(UI_FONT, 14, "bold")).pack(pady=(10, 5))
@@ -1483,11 +1585,11 @@ class LoginWin:
         # 新增切換選項：本地模式
         self.is_local = tk.BooleanVar(value=False)
         self.cb_local = tk.Checkbutton(self.root, text="切換至 Localhost 測試模式", 
-                                       variable=self.is_local, font=(UI_FONT, 10), fg="blue")
+                                       variable=self.is_local, font=(UI_FONT, 10), fg=_C["accent"])
         self.cb_local.pack()
 
         self.info_label = tk.Label(self.root, text=f"預設連線: {DB_IP} ({DB_USER})", 
-                                   fg="#666", font=(UI_FONT, 9))
+                                   fg=_C["text"], font=(UI_FONT, 9))
         self.info_label.pack()
 
         # self.pw = tk.Entry(self.root, show="*"); self.pw.pack(pady=10); self.pw.focus_set() ## 星號視覺上有點過時
@@ -1538,7 +1640,8 @@ if __name__ == "__main__":
                     t.start()
                     time.sleep(1.5)
 
-                    self.root = tk.Tk(); self.root.title("海洋動力診斷系統 v5.0"); self.root.geometry("650x850")
+                    self.root = tk.Tk(); self.root.title("海洋動力診斷系統 v7.0"); self.root.geometry("650x850")
+                    _apply_dark_theme(self.root)
                     # self.root.option_add('*Font', 'UI_FONT 14') #這是原本claude寫的，gemini code一直建議改成下面那行
                     self.root.option_add('*Font', f'{UI_FONT} 14')
                     self.root.option_add('*TCombobox*Listbox.font', (UI_FONT, 12)) # 確保下拉選單彈出的清單字體統一
@@ -1636,10 +1739,11 @@ if __name__ == "__main__":
                     first_day = today.replace(day=1)
 
                     # 原本的白色底設定（有點懶得改，先不動）
-                    tk.Label(self.root, text=f"連線伺服器: {self.e.host} | 帳號: {self.e.user}", fg="#666", font=(UI_FONT, 10)).pack(pady=5)
+                    tk.Label(self.root, text=f"連線伺服器: {self.e.host} | 帳號: {self.e.user}", fg=_C["text"], font=(UI_FONT, 10)).pack(pady=5)
+                    # tk.Label(self.root, text=f"連線伺服器: {self.e.host} | 帳號: {self.e.user}", fg="#033", font=(UI_FONT, 10)).pack(pady=5)
                     
                     is_local = (self.e.host == "127.0.0.1")
-                    f1 = tk.LabelFrame(self.root, text="1. 颱風與日期" + (" (測試模式停用颱風)" if is_local else "(颱風非必選)"), font=(UI_FONT), padx=10, pady=5); f1.pack(fill="x", padx=20)
+                    f1 = tk.LabelFrame(self.root, text="1. 颱風與日期" + (" (測試模式停用颱風)" if is_local else "(颱風非必選)"), font=(UI_FONT), bg=_C["bg"], fg=_C["text_dim"], padx=10, pady=5); f1.pack(fill="x", padx=20)
                     
                     years = self.e.fetch_years() if not is_local else []
                     self.yr_cb = ttk.Combobox(f1, values=years, state="readonly" if not is_local else "disabled", width=12, font=(UI_FONT)); self.yr_cb.pack(side="left")
@@ -1650,7 +1754,7 @@ if __name__ == "__main__":
                     if is_local: tk.Label(f1, text="本地連線中，請手動選擇日期", fg="blue", font=(UI_FONT, 9)).pack(side="left")
 
                     # 1. 起始時間行 (建立一個 Frame 橫向排列)
-                    f_sd = tk.Frame(self.root)
+                    f_sd = tk.Frame(self.root, bg=_C["bg"], padx=10, pady=5)
                     f_sd.pack(pady=5) # 這一行的垂直間距
                     tk.Label(f_sd, text="起始時間:", font=(UI_FONT)).pack(side="left")
                     self.sd = DateEntry(f_sd, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT))
@@ -1658,7 +1762,7 @@ if __name__ == "__main__":
                                         year=first_day.year, month=first_day.month, day=first_day.day)
                     self.sd.pack(side="left", padx=5) # padx 讓文字跟輸入框有點距離
                     # 2. 結束時間行
-                    f_ed = tk.Frame(self.root)
+                    f_ed = tk.Frame(self.root, bg=_C["bg"], padx=10, pady=5)
                     f_ed.pack(pady=5)
                     tk.Label(f_ed, text="結束時間:", font=(UI_FONT)).pack(side="left")
                     self.ed = DateEntry(f_ed, width=15, date_pattern='yyyy-mm-dd', font=(UI_FONT))
@@ -1830,13 +1934,47 @@ if __name__ == "__main__":
                         # ==========================================
                         if mode == "water":
                             import time
+                            from build_surge_report_figure import get_tsuwawa_thresholds
                             key = f"{stids[0]}_{time.time()}"
-                            dash_bridge.set_bundle(key, bundles, land_range=current_lr)
-                            # print(f"[go] current_lr={current_lr}")      # ← 加這行
-                            ty_label = self.ty_cb.get() or None   # e.g. "丹娜絲(2504L)"，未選颱風時為 None
-                            dash_bridge.set_bundle(key, bundles, land_range=current_lr, typhoon_label=ty_label)
+                            ty_label = self.ty_cb.get() or None  # e.g. "丹娜絲(2504L)"
+
+                            # 颱風資訊 dict（供 Dash 端暴潮偏差圖匯出）
+                            typhoon_info_for_bridge = None
+                            if ty_label and hasattr(self, 'ty_df') and not self.ty_df.empty:
+                                tid = ty_label.split('(')[-1].rstrip(')')
+                                row = self.ty_df[self.ty_df['id'] == tid]
+                                if not row.empty:
+                                    typhoon_info_for_bridge = row.iloc[0].to_dict()
+
+                            # 各站門檻值（供 Dash 端暴潮偏差圖匯出）
+                            thresholds_map_for_bridge = {}
+                            for b in bundles:
+                                stid_b = b.get('stid', '')
+                                if stid_b:
+                                    try:
+                                        thresholds_map_for_bridge[stid_b] = get_tsuwawa_thresholds(self.e.conn, stid_b)
+                                    except Exception:
+                                        thresholds_map_for_bridge[stid_b] = None
+
+                            dash_bridge.set_bundle(
+                                key, bundles,
+                                land_range=current_lr,
+                                typhoon_label=ty_label,
+                                typhoon_info=typhoon_info_for_bridge,
+                                thresholds_map=thresholds_map_for_bridge,
+                            )
                             print(f"[DEBUG go] ty_label={repr(ty_label)}")
                             webbrowser.open(f"http://127.0.0.1:{DASH_PORT}/?key={key}")
+                        # 測試OK後刪除以下if mode == "water"區塊
+                        # if mode == "water":
+                        #     import time
+                        #     key = f"{stids[0]}_{time.time()}"
+                        #     dash_bridge.set_bundle(key, bundles, land_range=current_lr)
+                        #     # print(f"[go] current_lr={current_lr}")      # ← 加這行
+                        #     ty_label = self.ty_cb.get() or None   # e.g. "丹娜絲(2504L)"，未選颱風時為 None
+                        #     dash_bridge.set_bundle(key, bundles, land_range=current_lr, typhoon_label=ty_label)
+                        #     print(f"[DEBUG go] ty_label={repr(ty_label)}")
+                        #     webbrowser.open(f"http://127.0.0.1:{DASH_PORT}/?key={key}")
                         # else:
                         elif mode == "full":
                             draw_diagnostic(bundles, current_lr)

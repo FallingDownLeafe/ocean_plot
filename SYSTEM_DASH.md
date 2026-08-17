@@ -509,6 +509,10 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 - 範本 (Template)：統一套用 `plotly_dark`
 - 交互模式：`hovermode='x unified'`（十字準星）且 `uirevision=True`（鎖定縮放視圖）
 - CSS 覆蓋：透過 `assets/custom.css` 強制修正 Dash Dropdown 預設亮色樣式，確保選單背景為 `#111820` 並具備懸停高亮效果
+- Tkinter 主題：`_apply_dark_theme(root)` 函式套用 `clam` 基底主題，
+  色彩沿用上表 _C 字典，於各視窗 `tk.Tk()` 建立後、widget 建立前呼叫。
+  `tk.*` 元件（Listbox、LabelFrame 等）以 `option_add` 或建構子 `bg=` 覆蓋；
+  `tkcalendar.DateEntry` 月曆與底部按鈕區框線保留系統預設色（已知限制）。
 
 ---
 
@@ -811,6 +815,10 @@ def set_bundle(key, bundle, land_range=None, typhoon_label=None,
 | 🟢 低 | `uirevision` 應為動態版本號 | 目前固定為 `True`，多次 push 新資料後縮放狀態可能不正確重置 |
 | 🟢 低 | `DEBUG print` 未清除 | `query_multi_tide_data` 內有多行 `print("[DEBUG]...")` 尚未移除 |
 | 🟢 低 | `bundle-poll` 500ms 效率 | 若 Dash 與 Tkinter 在同機執行，可縮短至 250ms；未來可改以 websocket 推送取代輪詢 |
+| 🟢 已修 | `fetch_years()` 年份解析錯誤 | 
+原本 `f"20{y}"` 硬寫前綴，導致 1950–1999 年颱風顯示為 2050–2099。
+改為 `yy >= 50 → 19xx` 的兩位數判斷，並加 `sorted(..., reverse=True)` 
+確保四位數年份正確降序排列。 |
 
 ### 架構面
 
