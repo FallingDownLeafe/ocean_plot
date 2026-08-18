@@ -819,6 +819,7 @@ def set_bundle(key, bundle, land_range=None, typhoon_label=None,
 原本 `f"20{y}"` 硬寫前綴，導致 1950–1999 年颱風顯示為 2050–2099。
 改為 `yy >= 50 → 19xx` 的兩位數判斷，並加 `sorted(..., reverse=True)` 
 確保四位數年份正確降序排列。 |
+| 🟢 已修 | on_selection 多子圖框選 STID 錯誤、DATATIME 空白 | 新增 trace-meta-store（dcc.Store）：build_water_figure() 建圖後反查各 trace 的 xaxis 屬性，回傳 (fig, trace_meta) tuple；on_selection 依 curveNumber 從 trace_meta 解析被框選子圖的 STID，並修正 _adapt_selected_data() 以處理多子圖的 "x2"/"x3" range key。已知限制：同一子圖內多儀器無法區分，SQL 統一使用主儀器站碼。 |
 
 ### 架構面
 

@@ -490,7 +490,41 @@ def build_water_figure(bundles: list, land_range=None, typhoon_label: str | None
     #     row=n, col=1, # secondary_y=False, 
     # )
 
-    return fig
+    # ── trace_meta：供 dash_app.py on_selection 判斷框選到哪個測站 ──────────
+    # 利用各 trace 的 xaxis 屬性（fig.add_trace(row=N) 後自動設定）反推所屬子圖，
+    # 再對應到 bundles[i]["stid"]，不需修改任何 add_trace 呼叫。
+    xaxis_to_stid: dict[str, str] = {}
+    for i, b in enumerate(bundles):
+        xref = "x" if i == 0 else f"x{i + 1}"
+        xaxis_to_stid[xref] = b["stid"]
+
+    trace_meta: list[dict] = []
+    for trace in fig.data:
+        xaxis = getattr(trace, "xaxis", None) or "x"
+        s     = xaxis_to_stid.get(xaxis, bundles[0]["stid"])
+        name  = getattr(trace, "name", "") or ""
+        if any(kw in name for kw in ("原始值", "QC≠Q")):
+            ft = "raw"
+        elif any(kw in name for kw in ("低頻趨勢", "25h-MA")):
+            ft = "lf"
+        elif "EWMA" in name:
+            ft = "ewma"
+        elif "平滑" in name:
+            ft = "smooth"
+        elif any(kw in name for kw in ("預報", "pred")):
+            ft = "pred"
+        elif "差值" in name:
+            ft = "diff"
+        elif any(kw in name for kw in ("高潮", "低潮", "極值")):
+            ft = "tide_extreme"
+        else:
+            ft = "wl"
+        trace_meta.append({"stid": s, "field_type": ft})
+
+    return fig, trace_meta
+
+    # Patch 1 替換為以上結構
+    # return fig
 
 # ── 白底簡報版：忠實對應 build_water_figure() 的 §0~§6 結構 ──────────────
 _TYPE_COLORS_WHITE = {2: '#1f77b4', 3: '#0d47a1', 4: '#1565c0'}   # 音波/壓力/雷達
@@ -506,7 +540,7 @@ _DIFF_COLORS_WHITE = ['#ff7f0e', '#e377c2', '#00838f']
 _REPORT_FONT = "Microsoft JhengHei, Noto Sans TC, Arial, sans-serif"
 
 
-def build_water_report_figure(bundles: list, land_range=None) -> go.Figure:
+def build_water_report_figure(bundles: list, land_range=None, zoom_range=None) -> go.Figure:
     """
     白底版水位圖，結構逐項對應 build_water_figure()，僅調整配色/背景/字體。
     """
@@ -531,6 +565,17 @@ def build_water_report_figure(bundles: list, land_range=None) -> go.Figure:
         row       = idx + 1
         df        = b["df"]
         tide_meta = b.get("tide_meta", {})
+
+        # ----------- Claude發現這有漏洞，因為無法過濾高低潮三角形的時間，所以先撤回 -----------
+        # # 套用 zoom 時間過濾（匯出範圍與畫面一致）
+        # if zoom_range:
+        #     try:
+        #         ts0 = pd.to_datetime(zoom_range["x_start"])
+        #         ts1 = pd.to_datetime(zoom_range["x_end"])
+        #         df  = df[(df["Time"] >= ts0) & (df["Time"] <= ts1)].copy()
+        #     except Exception:
+        #         pass
+        # ----------- 撤回完畢 ------------
 
         # § 0 舊系統降級路徑
         if not tide_meta:
@@ -729,4 +774,12 @@ def build_water_report_figure(bundles: list, land_range=None) -> go.Figure:
         margin=dict(l=50, r=60, t=60, b=50), autosize=True,
     )
     fig.update_xaxes(rangeslider=dict(visible=False))
+    # 若有 zoom 範圍，固定 x 軸（使匯出與畫面一致）
+    if zoom_range:
+        try:
+            ts0 = pd.to_datetime(zoom_range["x_start"])
+            ts1 = pd.to_datetime(zoom_range["x_end"])
+            fig.update_xaxes(range=[ts0, ts1])
+        except Exception as e:
+            print(f"[DEBUG zoom export] {e}")   # 先留著看有沒有報錯
     return fig

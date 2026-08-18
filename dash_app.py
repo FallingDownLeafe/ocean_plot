@@ -145,6 +145,218 @@ def build_mode2_sql_by_time(sel: dict, stid: str,
     )
     return header + "\n\n".join(sqls)
 
+def build_mode3_sql(t_start: str, t_end: str, stid: str, bundle_key: str) -> str:
+    import pandas as pd
+    import re
+    import dash_bridge
+
+    if not bundle_key:
+        return "-- [錯誤] 找不到目前資料快取 Key，請重新載入圖表"
+    bundles = dash_bridge.get_bundle(bundle_key)
+    if not bundles:
+        return "-- [錯誤] 資料快取已過期或不存在，請重新載入圖表"
+
+    # 颱風標籤（所有站共用）
+    ty_label = dash_bridge.get_typhoon_label() or ""
+    cname, ty_id = "NULL", "NULL"
+    m = re.match(r"^(.*?)\((.*?)\)$", ty_label)
+    if m:
+        cname = f"'{m.group(1)}'"
+        ty_id  = f"'{m.group(2)}'"
+    elif ty_label:
+        cname = f"'{ty_label}'"
+
+    sqls = []
+    for target_b in bundles:
+        stid_b = str(target_b.get("stid", ""))
+        df = target_b.get("df")
+        if df is None or df.empty:
+            sqls.append(f"-- [略過] 測站 {stid_b}：資料為空")
+            continue
+
+        sub_df = df
+        if t_start and t_end:
+            try:
+                sub_df = df[
+                    (df["Time"] >= pd.to_datetime(t_start)) &
+                    (df["Time"] <= pd.to_datetime(t_end))
+                ]
+            except Exception:
+                pass
+
+        if sub_df.empty:
+            sqls.append(f"-- [略過] 測站 {stid_b}：指定時間範圍內無資料")
+            continue
+
+        # MAXRISE：最高觀測水位
+        wl_col     = f"WL_{stid_b}"
+        wl_raw_col = f"WL_{stid_b}_raw"
+        target_wl_col = (wl_col if wl_col in sub_df.columns
+                         else wl_raw_col if wl_raw_col in sub_df.columns
+                         else None)
+        maxrise, maxriset = "NULL", "NULL"
+        if target_wl_col and sub_df[target_wl_col].notna().any():
+            idx_max  = sub_df[target_wl_col].idxmax()
+            maxrise  = f"'{int(round(sub_df.loc[idx_max, target_wl_col]))}'"
+            maxriset = f"'{sub_df.loc[idx_max, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+
+        # MAXDEV / MAXNEG：暴潮偏差（觀測 − 天文潮，優先 pred_a，退而 pred_h）
+        obs_col    = wl_col     if wl_col     in sub_df.columns else None
+        pred_a_col = f"WL_{stid_b}_pred_a" if f"WL_{stid_b}_pred_a" in sub_df.columns else None
+        pred_h_col = f"WL_{stid_b}_pred_h" if f"WL_{stid_b}_pred_h" in sub_df.columns else None
+        maxdev, maxdevt = "NULL", "NULL"
+        maxneg, maxnegt = "NULL", "NULL"
+
+        if obs_col:
+            pred_col = pred_a_col or pred_h_col
+            if pred_col:
+                surge = (sub_df[obs_col] - sub_df[pred_col]).dropna()
+            elif "Resi" in sub_df.columns:
+                surge = sub_df["Resi"].dropna()
+            else:
+                surge = pd.Series(dtype=float)
+
+            if not surge.empty:
+                idx_hi  = surge.idxmax()
+                maxdev  = f"'{int(round(surge.loc[idx_hi]))}'"
+                maxdevt = f"'{sub_df.loc[idx_hi, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+                idx_lo  = surge.idxmin()
+                maxneg  = f"'{int(round(surge.loc[idx_lo]))}'"
+                maxnegt = f"'{sub_df.loc[idx_lo, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+
+        sqls.append(
+            f"INSERT INTO mrbank.surge\n"
+            f"(ID, STID, MAXRISE, MAXRISET, MAXDEV, MAXDEVT, MAXNEG, MAXNEGT,"
+            f" QC, CNAME, KIND, PATH, INTENSITY, SPRING, PRES, VC, R7)\nVALUES (\n"
+            f"  {ty_id}, '{stid_b}', {maxrise}, {maxriset},"
+            f" {maxdev}, {maxdevt}, {maxneg}, {maxnegt},\n"
+            f"  'a', {cname}, NULL, NULL, NULL, NULL, NULL, NULL, NULL\n);"
+        )
+
+    return "\n\n".join(sqls) if sqls else "-- [錯誤] 無可用資料"
+
+# ---------------- Claude改成產出多個SQL，整段函式替換成上面那個版本，確認可行後刪除 ----------------
+# def build_mode3_sql(t_start: str, t_end: str, stid: str, bundle_key: str) -> str:
+#     import pandas as pd
+#     import re
+#     import dash_bridge
+    
+#     if not bundle_key:
+#         return "-- [錯誤] 找不到目前資料快取 Key，請重新載入圖表"
+#     bundles = dash_bridge.get_bundle(bundle_key)
+#     if not bundles:
+#         return "-- [錯誤] 資料快取已過期或不存在，請重新載入圖表"
+    
+#     target_b = next((b for b in bundles if str(b.get("stid")) == str(stid)), None)
+#     if not target_b:
+#         return f"-- [錯誤] 找不到測站 {stid} 的快取資料"
+        
+#     df = target_b.get("df")
+#     if df is None or df.empty:
+#         return "-- [錯誤] 該測站的資料表為空"
+
+#     sub_df = df
+#     if t_start and t_end:
+#         try:
+#             ts_start = pd.to_datetime(t_start)
+#             ts_end = pd.to_datetime(t_end)
+#             sub_df = df[(df["Time"] >= ts_start) & (df["Time"] <= ts_end)]
+#         except Exception:
+#             pass
+            
+#     if sub_df.empty:
+#         return "-- [錯誤] 指定時間範圍內無任何資料"
+
+#     ty_label = dash_bridge.get_typhoon_label() or ""
+#     cname, ty_id = "NULL", "NULL"
+#     m = re.match(r"^(.*?)\((.*?)\)$", ty_label)
+#     if m:
+#         cname = f"'{m.group(1)}'"
+#         ty_id = f"'{m.group(2)}'"
+#     elif ty_label:
+#         cname = f"'{ty_label}'"
+
+#     wl_col = f"WL_{stid}"
+#     wl_raw_col = f"WL_{stid}_raw"
+#     target_wl_col = wl_col if wl_col in sub_df.columns else (wl_raw_col if wl_raw_col in sub_df.columns else None)
+    
+#     maxrise, maxriset = "NULL", "NULL"
+#     if target_wl_col and sub_df[target_wl_col].notna().any():
+#         idx_max = sub_df[target_wl_col].idxmax()
+#         maxrise = f"'{int(round(sub_df.loc[idx_max, target_wl_col]))}'"
+#         maxriset = f"'{sub_df.loc[idx_max, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+
+#     # ---------------- Antigravity寫錯的開始段落 ----------------
+#     # diff_cols = [c for c in sub_df.columns if c.startswith(f"Diff_{stid}_p_")]
+#     # target_diff_col = diff_cols[0] if diff_cols else None
+    
+#     # maxdev, maxdevt = "NULL", "NULL"
+#     # maxneg, maxnegt = "NULL", "NULL"
+    
+#     # if target_diff_col and sub_df[target_diff_col].notna().any():
+#     #     idx_max_dev = sub_df[target_diff_col].idxmax()
+#     #     maxdev = f"'{int(round(sub_df.loc[idx_max_dev, target_diff_col]))}'"
+#     #     maxdevt = f"'{sub_df.loc[idx_max_dev, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+        
+#     #     idx_min_dev = sub_df[target_diff_col].idxmin()
+#     #     maxneg = f"'{int(round(sub_df.loc[idx_min_dev, target_diff_col]))}'"
+#     #     maxnegt = f"'{sub_df.loc[idx_min_dev, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+#     # ---------------- Antigravity寫錯的結束段落 ----------------
+
+#     # ---------------- Claude傳入h的開始段落 ----------------
+#     # # Resi = WL_{primary} - WL_{primary}_pred_h，為暴潮偏差序列
+#     # resi_col = "Resi" if "Resi" in sub_df.columns else None
+
+#     # maxdev, maxdevt = "NULL", "NULL"
+#     # maxneg, maxnegt = "NULL", "NULL"
+
+#     # if resi_col and sub_df[resi_col].notna().any():
+#     #     idx_max_dev = sub_df[resi_col].idxmax()
+#     #     maxdev  = f"'{int(round(sub_df.loc[idx_max_dev, resi_col]))}'"
+#     #     maxdevt = f"'{sub_df.loc[idx_max_dev, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+
+#     #     idx_min_dev = sub_df[resi_col].idxmin()
+#     #     maxneg  = f"'{int(round(sub_df.loc[idx_min_dev, resi_col]))}'"
+#     #     maxnegt = f"'{sub_df.loc[idx_min_dev, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+#     # ---------------- Claude傳入h的結束段落 ----------------
+
+#     # 暴潮偏差 = 觀測水位 − 天文潮預報
+#     # 優先 pred_a（調和分析，更貼近當年天文潮趨勢）；退而 pred_h；最後 Resi 備援
+#     obs_col    = f"WL_{stid}"         if f"WL_{stid}"         in sub_df.columns else None
+#     pred_a_col = f"WL_{stid}_pred_a"  if f"WL_{stid}_pred_a"  in sub_df.columns else None
+#     pred_h_col = f"WL_{stid}_pred_h"  if f"WL_{stid}_pred_h"  in sub_df.columns else None
+
+#     maxdev, maxdevt = "NULL", "NULL"
+#     maxneg, maxnegt = "NULL", "NULL"
+
+#     if obs_col:
+#         pred_col = pred_a_col or pred_h_col      # a 優先
+#         if pred_col:
+#             surge = (sub_df[obs_col] - sub_df[pred_col]).dropna()
+#         elif "Resi" in sub_df.columns:
+#             surge = sub_df["Resi"].dropna()      # 最後備援（= WL − pred_h）
+#         else:
+#             surge = pd.Series(dtype=float)
+
+#         if not surge.empty:
+#             idx_max = surge.idxmax()
+#             maxdev  = f"'{int(round(surge.loc[idx_max]))}'"
+#             maxdevt = f"'{sub_df.loc[idx_max, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+
+#             idx_min = surge.idxmin()
+#             maxneg  = f"'{int(round(surge.loc[idx_min]))}'"
+#             maxnegt = f"'{sub_df.loc[idx_min, 'Time'].strftime('%Y-%m-%d %H:%M:%S')}'"
+
+#     sql = f"""INSERT INTO mrbank.surge 
+# (ID, STID, MAXRISE, MAXRISET, MAXDEV, MAXDEVT, MAXNEG, MAXNEGT, QC, CNAME, KIND, PATH, INTENSITY, SPRING, PRES, VC, R7) 
+# VALUES (
+#   {ty_id}, '{stid}', {maxrise}, {maxriset}, {maxdev}, {maxdevt}, {maxneg}, {maxnegt}, 
+#   'a', {cname}, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+# );"""
+    
+#     return sql
+# ---------------- 確認上方新版本函式可行後刪除截止線 ----------------
+
 
 def _adapt_selected_data(selected_data: dict) -> dict:
     """
@@ -156,9 +368,38 @@ def _adapt_selected_data(selected_data: dict) -> dict:
           "range":  {"x": ["start", "end"], "y": [lo, hi]}
         }
     """
-    rng   = selected_data.get("range") or {}
-    x_rng = rng.get("x", [None, None])
-    y_rng = rng.get("y", [None, None])
+
+    # ------------- Patch 3 替換開始 -------------
+    # rng   = selected_data.get("range") or {}
+    # x_rng = rng.get("x", [None, None])
+    # y_rng = rng.get("y", [None, None])
+
+    # return {
+    #     "x_start":     x_rng[0] if len(x_rng) > 0 else None,
+    #     "x_end":       x_rng[1] if len(x_rng) > 1 else None,
+    #     "y_start":     y_rng[0] if len(y_rng) > 0 else None,
+    #     "y_end":       y_rng[1] if len(y_rng) > 1 else None,
+    #     "point_count": len(selected_data.get("points", [])),
+    #     "points":      [{"x": p.get("x"), "y": p.get("y")}
+    #                     for p in selected_data.get("points", [])],
+    # }
+    # ------------- Patch 3 替換結束 -------------
+    
+    rng = selected_data.get("range") or {}
+
+    # 多子圖時 key 隨列號變化（"x"/"x2"/"x3"...，"y"/"y2"/"y3"...）
+    x_rng = [None, None]
+    for key in ["x"] + [f"x{i}" for i in range(2, 20)]:
+        if key in rng:
+            x_rng = rng[key]
+            break
+
+    # y 範圍：取第一個主軸的 y（水位 mm），跳過 secondary 軸
+    y_rng = [None, None]
+    for key in ["y"] + [f"y{i}" for i in range(2, 40)]:
+        if key in rng:
+            y_rng = rng[key]
+            break
 
     return {
         "x_start":     x_rng[0] if len(x_rng) > 0 else None,
@@ -356,6 +597,7 @@ app.layout = html.Div(
         dcc.Store(id="stid-store", data=None),
         dcc.Store(id="bundle-key-store", data=None),
         dcc.Store(id="zoom-range-store", data=None),
+        dcc.Store(id="trace-meta-store", data=None),   # Patch 2 新增
         dcc.Interval(id="bundle-poll", interval=500, n_intervals=0),
 
         # ── 頂部 Header ───────────────────────────────────────────────────────
@@ -616,6 +858,8 @@ app.layout = html.Div(
                                         "value": "1"},
                                         {"label": " Mode 2　MIN 欄位四則運算",
                                         "value": "2"},
+                                        {"label": " Mode 3　生成暴潮記錄 SQL",
+                                        "value": "3"},
                                     ],
                                     value="1",
                                     inputStyle={"marginRight": "6px"},
@@ -854,7 +1098,7 @@ app.layout = html.Div(
                             },
                             children=[
                                 html.Button(
-                                    "📥 匯出白底醜字體 PNG",
+                                    "📥 匯出一般白底圖 PNG",
                                     id="water-export-btn",
                                     n_clicks=0,
                                     style={
@@ -869,6 +1113,38 @@ app.layout = html.Div(
                             ],
                         ),
 
+                        # §G  匯出暴潮偏差圖 PNG（颱風事件用）
+                        html.Div(
+                            style={
+                                "backgroundColor": "#1e2a3a",
+                                "border": f"1px solid {_CLR_BORDER}",
+                                "borderRadius": "8px",
+                                "padding": "14px 16px",
+                            },
+                            children=[
+                                html.Button(
+                                    "🌊 匯出暴潮偏差圖 PNG",
+                                    id="surge-export-btn",
+                                    n_clicks=0,
+                                    style={
+                                        "width": "100%",
+                                        "fontFamily": _FONT_UI, "fontSize": "13px",
+                                        "padding": "8px 0", "backgroundColor": "#1a3a5c",
+                                        "color": "#7eb8f7", "border": f"1px solid {_CLR_BORDER}",
+                                        "borderRadius": "4px", "cursor": "pointer",
+                                    },
+                                ),
+                                html.Div(
+                                    id="surge-export-status",
+                                    style={
+                                        "fontSize": "11px", "color": "#888",
+                                        "minHeight": "16px", "marginTop": "6px",
+                                    },
+                                ),
+                                dcc.Download(id="surge-download"),
+                            ],
+                        ),
+                        
                     # ],  # end QC 面板 children
 
                     ],  # end Tab 1 children
@@ -1052,9 +1328,8 @@ app.layout = html.Div(
     Input("qc-mode", "value"),
 )
 def toggle_mode_controls(mode: str):
-    """Mode 1 ↔ Mode 2 切換時，顯示對應的參數輸入區，隱藏另一區。"""
+    """Mode 1 ↔ Mode 2 ↔ Mode 3 切換時，顯示對應的參數輸入區。"""
     _base = {
-        # "backgroundColor": "white",
         "backgroundColor": "#1e2a3a",
         "border": f"1px solid {_CLR_BORDER}",
         "borderRadius": "8px",
@@ -1062,7 +1337,12 @@ def toggle_mode_controls(mode: str):
     }
     show = {**_base, "display": "block"}
     hide = {**_base, "display": "none"}
-    return (show, hide) if mode == "1" else (hide, show)
+    if mode == "1":
+        return show, hide
+    elif mode == "2":
+        return hide, show
+    else:
+        return hide, hide
 
 
 # ── Callback 2：Box Select 框選 → 產生 SQL ───────────────────────────────────
@@ -1072,40 +1352,73 @@ def toggle_mode_controls(mode: str):
     Output("selection-info", "children"),
     Output("status-bar",     "children"),
     Input("main-graph",      "selectedData"),
-    State("qc-mode",         "value"),
+    Input("qc-mode",         "value"),
     State("new-qc-value",    "value"),
     State("qc-operator",     "value"),
     State("qc-operand",      "value"),
     State("stid-store",      "data"),
+    State("bundle-key-store", "data"),
+    State("trace-meta-store", "data"), # Patch 5-A 新增
     prevent_initial_call=True,
 )
-def on_selection(selected_data, mode, new_qc, operator, operand, stid):
+def on_selection(selected_data, mode, new_qc, operator, operand, stid, bundle_key, trace_meta): # Patch 5-A 新增結尾, trace_meta
     """
-    dcc.Graph.selectedData 觸發（使用者以 Box Select 框選圖表區域）。
+    dcc.Graph.selectedData 或 qc-mode 改變時觸發。
     轉換格式後呼叫對應的 SQL builder，結果寫入 Textarea。
     """
-    if not selected_data:
+    import dash
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+
+    # 如果是 Mode 1/2 但沒框選資料，不產出 SQL
+    if mode in ["1", "2"] and not selected_data:
         return (
             "-- 框選範圍為空，請重新操作。",
             "框選結果：無資料點。",
             "狀態：框選範圍為空。",
         )
 
-    # Dash selectedData → SQL builder 所需 sel dict
-    sel     = _adapt_selected_data(selected_data)
-    cnt     = sel.get("point_count", 0)
-    t_start = _clean_ts(sel.get("x_start")) or "—"
-    t_end   = _clean_ts(sel.get("x_end"))   or "—"
-    stid    = stid or _DEMO_STID
+    # Mode 3 時，即使沒有框選，也能生成 SQL (預設全時段)
+    sel = _adapt_selected_data(selected_data) if selected_data else {}
+    cnt = sel.get("point_count", 0)
+    t_start = _clean_ts(sel.get("x_start")) if sel.get("x_start") else None
+    t_end   = _clean_ts(sel.get("x_end")) if sel.get("x_end") else None
+
+    # 從 trace_meta 解析框選點屬於哪個測站（覆蓋 stid-store 中的第一站）
+    if selected_data and trace_meta:
+        stid_counts: dict[str, int] = defaultdict(int)
+        for p in selected_data.get("points", []):
+            cn = p.get("curveNumber", -1)
+            if 0 <= cn < len(trace_meta):
+                entry = trace_meta[cn]
+                if entry.get("field_type") in ("wl", "raw"):
+                    s = entry.get("stid")
+                    if s:
+                        stid_counts[s] += 1
+        if stid_counts:
+            stid = max(stid_counts, key=stid_counts.get)
+
+    stid = stid or _DEMO_STID
 
     if mode == "1":
+    # Patch 5-B 替換為以上內容
+    # stid = stid or _DEMO_STID
+
+    # if mode == "1":
         sql  = build_mode1_sql(sel, stid, int(new_qc or 9))
-        info = f"Mode 1 ｜ {cnt} 點 ｜ t = [ {t_start}  ～  {t_end} ]"
-    else:
+        info = f"Mode 1 ｜ {cnt} 點 ｜ t = [ {t_start or '—'}  ～  {t_end or '—'} ]"
+    elif mode == "2":
         sql  = build_mode2_sql_by_time(
             sel, stid, operator or "+", float(operand or 0)
         )
         info = f"Mode 2 ｜ {cnt} 點 ｜ 運算：原值 {operator or '+'} {operand or 0}"
+    else:
+        # Mode 3
+        sql = build_mode3_sql(t_start, t_end, stid, bundle_key)
+        if not t_start and not t_end:
+            info = f"Mode 3 ｜ 全時段 ｜ 生成 mrbank.surge"
+        else:
+            info = f"Mode 3 ｜ t = [ {t_start} ～ {t_end} ] ｜ 生成 mrbank.surge"
 
     status = f"就緒｜STID：{stid}｜{info}"
     return sql, info, status
@@ -1148,6 +1461,7 @@ def unlock_page(n_clicks):
     Output("vdc-stats-output", "children"),
     Output("page-lock-status", "children"),
     Output("page-lock-status", "style"),
+    Output("trace-meta-store", "data"), # Patch 4-A 新增
     Input("bundle-key-store", "data"),
     Input("url", "search"),
     Input("right-panel-tabs", "value"),
@@ -1176,15 +1490,15 @@ def render_figure(poll_key, url_search, active_tab, diff_type, zoom_range):
 
     key = target_key
     if not key:
-        return no_update, no_update, no_update, lock_text, lock_style
+        return no_update, no_update, no_update, lock_text, lock_style, no_update # Patch 4-B 新增結尾 , no_update
     if key == "demo":
-        return make_demo_figure(), _DEMO_STID, no_update, lock_text, lock_style
+        return make_demo_figure(), _DEMO_STID, no_update, lock_text, lock_style, no_update # Patch 4-B 新增結尾 , no_update
 
     bundle = dash_bridge.get_bundle(key)
     if bundle is None:
         # return no_update, no_update, no_update
         # 若 key 存在但資料已被 MAX_CACHE_SIZE 清理掉
-        return go.Figure(layout=dict(title="⚠️ 資料快取已過期，請重新從主程式查詢")), no_update, "快取已清空", lock_text, lock_style
+        return go.Figure(layout=dict(title="⚠️ 資料快取已過期，請重新從主程式查詢")), no_update, "快取已清空", lock_text, lock_style, no_update # Patch 4-C 新增結尾 , no_update
 
     bundles = bundle if isinstance(bundle, list) else [bundle]
     primary_stid = bundles[0].get("stid", _DEMO_STID) if bundles else _DEMO_STID
@@ -1217,64 +1531,19 @@ def render_figure(poll_key, url_search, active_tab, diff_type, zoom_range):
                         f"測站 {stid_key}：{stats.get('status', '未知')}",
                         style={"color": "#d9534f", "marginBottom": "8px"}
                     ))
-            return fig, primary_stid, stats_children or "無統計資料。", lock_text, lock_style
+            return fig, primary_stid, stats_children or "無統計資料。", lock_text, lock_style, no_update # Patch 4-D 新增結尾 , no_update
         except Exception as e:
             import traceback
             traceback.print_exc()   # 印到 server 終端機
             print(f"[VdC ERROR] {e}")
-            return no_update, no_update, f"錯誤：{e}", lock_text, lock_style
+            return no_update, no_update, f"錯誤：{e}", lock_text, lock_style, no_update # Patch 4-D 新增結尾 , no_update
     else:
         lr = dash_bridge.get_land_range()
         typhoon_label = dash_bridge.get_typhoon_label()
         # fig = build_water_figure(bundles, land_range=land_range, typhoon_label=typhoon_label)
         print(f"[DEBUG dash] typhoon_label={repr(typhoon_label)}")
-        fig = build_water_figure(bundles, land_range=lr, typhoon_label=typhoon_label)
-        return fig, primary_stid, no_update, lock_text, lock_style
-        return build_water_figure(bundles, land_range=lr), primary_stid, no_update, lock_text, lock_style
-
-# @app.callback(
-#     Output("main-graph", "figure"),
-#     Output("yaxis-status", "children"),
-#     Input("yaxis-apply-btn", "n_clicks"),
-#     Input("yaxis-clear-btn", "n_clicks"),     # 新增
-#     State("yaxis-max", "value"),
-#     State("yaxis-min", "value"),
-#     State("main-graph", "figure"),
-#     prevent_initial_call=True,
-# )
-# def apply_yaxis_range(n_apply, n_clear, y_max, y_min, current_fig):
-#     if current_fig is None:
-#         raise Dash.exceptions.PreventUpdate
-
-#     layout = current_fig.get("layout", {})
-#     left_yaxis_keys = [
-#         k for k in layout
-#         if k == "yaxis" or (k.startswith("yaxis") and k[5:].isdigit() and int(k[5:]) % 2 == 1)
-#     ]
-
-#     patched = Patch()
-
-#     # ── 清除分支 ──────────────────────────────────────────
-#     if ctx.triggered_id == "yaxis-clear-btn":
-#         for key in left_yaxis_keys:
-#             patched["layout"][key]["autorange"] = True
-#             patched["layout"][key]["range"] = None
-#         return patched, "✓ 已重設為自動範圍"
-
-#     # ── 套用分支 ──────────────────────────────────────────
-#     if y_max is None and y_min is None:
-#         return no_update, "⚠ 請至少輸入一個值"
-#     if y_max is not None and y_min is not None and y_max <= y_min:
-#         return no_update, "⚠ 上限必須大於下限"
-
-#     for key in left_yaxis_keys:
-#         patched["layout"][key]["autorange"] = False
-#         patched["layout"][key]["range"] = [y_min, y_max]   # None 的一側 Plotly 會自動處理
-
-#     n_rows = len(left_yaxis_keys)
-#     lo_str = str(y_min) if y_min is not None else "auto"
-#     hi_str = str(y_max) if y_max is not None else "auto"
-#     return patched, f"✓ 已套用至 {n_rows} 個子圖　[{lo_str}, {hi_str}]"
+        fig, trace_meta = build_water_figure(bundles, land_range=lr, typhoon_label=typhoon_label) # Patch 4-E 新增 , trace_meta
+        return fig, primary_stid, no_update, lock_text, lock_style, trace_meta # Patch 4-E 新增結尾 , trace_meta
 
 
 # 改動 B：apply_yaxis_range callback 完整替換
@@ -1456,10 +1725,11 @@ def export_vdc_report(n_clicks, key, diff_type, zoom_range):
     Output("water-download", "data"),
     Input("water-export-btn", "n_clicks"),
     State("bundle-key-store", "data"),
+    State("zoom-range-store", "data"),
     State("main-graph", "figure"),   # ← 新增：讀取畫面上目前的圖，含手動開關的圖例狀態
     prevent_initial_call=True,
 )
-def export_water_report(n_clicks, key, current_fig):
+def export_water_report(n_clicks, key, zoom_range, current_fig):
     import io
     from datetime import datetime
     from build_water_figure import build_water_report_figure
@@ -1475,7 +1745,7 @@ def export_water_report(n_clicks, key, current_fig):
     n = len(bundles)
     land_range = dash_bridge.get_land_range()
 
-    fig = build_water_report_figure(bundles, land_range=land_range)
+    fig = build_water_report_figure(bundles, land_range=land_range, zoom_range=zoom_range)
 
     # ── 套用畫面上目前的圖例開關狀態（以線名 name 對應）──────────────
     if current_fig and current_fig.get("data"):
@@ -1511,6 +1781,63 @@ def export_water_report(n_clicks, key, current_fig):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"Water_Report_{first_stid}{suffix}_{timestamp}.png"
     return dcc.send_bytes(buf.read(), filename)
+
+@app.callback(
+    Output("surge-download",      "data"),
+    Output("surge-export-status", "children"),
+    Input("surge-export-btn",     "n_clicks"),
+    State("bundle-key-store",     "data"),
+    prevent_initial_call=True,
+)
+def export_surge_report(n_clicks, key):
+    import io
+    import zipfile
+    from datetime import datetime
+    from build_surge_report_figure import build_surge_report_figure
+
+    if not key:
+        raise PreventUpdate
+
+    bundle = dash_bridge.get_bundle(key)
+    if bundle is None:
+        return no_update, "⚠ 快取已過期，請重新查詢"
+
+    typhoon_info = dash_bridge.get_typhoon_info()
+    if typhoon_info is None:
+        return no_update, "⚠ 無颱風資訊，請確認是否選擇了颱風事件後再查詢"
+
+    thresholds_map = dash_bridge.get_thresholds_map()
+    bundles = bundle if isinstance(bundle, list) else [bundle]
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    if len(bundles) == 1:
+        b = bundles[0]
+        stid = b.get("stid", "unknown")
+        fig = build_surge_report_figure(b, typhoon_info, thresholds_map.get(stid))
+        buf = io.BytesIO()
+        fig.write_image(buf, format="png", scale=2, width=1400, height=500) # 原本Claude設計height=700，但是我Tkinter設計按鈕產的是500，可以看看差異
+        buf.seek(0)
+        filename = f"Surge_{stid}_{timestamp}.png"
+        return dcc.send_bytes(buf.read(), filename), f"✓ {filename}"
+
+    else:
+        # 多站 → ZIP，每站獨立一張 PNG
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for b in bundles:
+                stid = b.get("stid", "unknown")
+                try:
+                    fig = build_surge_report_figure(b, typhoon_info, thresholds_map.get(stid))
+                    img_buf = io.BytesIO()
+                    fig.write_image(img_buf, format="png", scale=2, width=1400, height=500)
+                    img_buf.seek(0)
+                    zf.writestr(f"Surge_{stid}.png", img_buf.read())
+                except Exception as e:
+                    print(f"[Surge Export] 測站 {stid} 跳過：{e}")
+        zip_buf.seek(0)
+        ty_id = typhoon_info.get('id', 'ty')
+        filename = f"Surge_{ty_id}_{timestamp}.zip"
+        return dcc.send_bytes(zip_buf.read(), filename), f"✓ {len(bundles)} 站 → {filename}"
 # ══════════════════════════════════════════════════════════════════════════════
 # § 7  Entry Point
 #

@@ -1,7 +1,10 @@
 # 海洋動力診斷儀表板 — 系統技術文件
 
+> ⚠️ **本文件記錄 HTML 架構時期（ocean_plot.py + plotly_qc_select.py）的設計。現行 Dash 架構請參閱 SYSTEM_DASH.md。**  
+> 資料管線（§五）與資料表定義（§十）兩節與現行程式相同，仍為有效參考。
+
 > 維護對象：有程式背景的維運人員、AI 協作  
-> 最後更新：2026-05
+> 最後更新：2026-05-27
 
 ---
 
@@ -271,7 +274,8 @@ candidates = q_ids + [stid]  # 去重保留順序
 | kind 值 | 站種 |
 |---------|------|
 | 1/2/3 | 氣象站 |
-| 7 | 潮位站 |
+| 6 | 潮位站 |
+| 7 | 浮球 |
 | 8 | 浮標 |
 
 ---
@@ -329,14 +333,14 @@ MR 查詢優先順序：全年 MR（`MONTH=0`）→ 當月 MR；查詢條件 `ti
 |------|--------|------|------|
 | 1/2/3（氣象站） | `meteo` | `p×0.1 as P` | `min=0` 篩選整點 |
 | 8（浮標） | `pres1` | expand_data(HR0~HR23) × 0.1 | freq='1h' |
-| 7（潮位站） | `pres6` | expand_data × 0.1，限 QC='Q' | freq='1h' |
+| 6（潮位站） | `pres6` | expand_data × 0.1，限 QC='Q' | freq='1h' |
 
 **B. 風速/風向 (WS/WD)**
 
 | kind | 資料表 | 欄位 | 備註 |
 |------|--------|------|------|
 | 1/2/3（氣象站） | `meteo` | `ws×0.1 as WS, wd as WD` | `min=0` 篩選整點 |
-| 7（潮位站） | `wind` | `VM×0.1 as WS, DM as WD`，Z='6' | QC 分流為 WS/WS_raw |
+| 6（潮位站） | `wind` | `VM×0.1 as WS, DM as WD`，Z='6' | QC 分流為 WS/WS_raw |
 | 8（浮標） | `wind` | `VM×0.1 as WS, DM as WD`，Z IN ('2','3') | Z 小者優先 |
 
 **C. 氣溫 (AT)**
@@ -344,7 +348,7 @@ MR 查詢優先順序：全年 MR（`MONTH=0`）→ 當月 MR；查詢條件 `ti
 | kind | 資料表 | 欄位 | 備註 |
 |------|--------|------|------|
 | 1/2/3（氣象站） | `meteo` | `t×0.1 as AT` | `min=0` 篩選整點 |
-| 7（潮位站） | `stemp6` | expand_data，Z='-3'，× 0.1 | QC 分流為 AT/AT_raw |
+| 6（潮位站） | `stemp6` | expand_data，Z='-3'，× 0.1 | QC 分流為 AT/AT_raw |
 | 8（浮標） | `stemp1` | expand_data，Z='-3'，× 0.1 | freq='1h' |
 
 **D. 海溫 (WT)**（同迴圈，各種 kind 的邏輯類似氣溫）
@@ -352,7 +356,7 @@ MR 查詢優先順序：全年 MR（`MONTH=0`）→ 當月 MR；查詢條件 `ti
 | kind | 資料表 | 欄位 | 備註 |
 |------|--------|------|------|
 | 8（浮標） | `stemp1` | Z='0'，× 0.1 | freq='1h' |
-| 7（潮位站） | `stemp6` | Z='0'，× 0.1 | QC 分流為 WT/WT_raw |
+| 6（潮位站） | `stemp6` | Z='0'，× 0.1 | QC 分流為 WT/WT_raw |
 
 三項（P, W, AT）皆有資料後提早 break，WT 有資料即停止。
 
@@ -483,6 +487,9 @@ WHERE  STID     = '{stid}'
 
 ## 八、打包指令（Windows PowerShell）
 
+> ⚠️ **以下指令已過時。** `--hidden-import mysql.connector` 無法涵蓋執行期動態載入的語系檔，打包後連線失敗時會出現與問題無關的次生錯誤。  
+> 現行架構請改用 `--collect-all mysql.connector`，詳見 SYSTEM_DASH.md §九。
+
 ```
 C:/Python313/python.exe -m PyInstaller --onefile --windowed --hidden-import mysql.connector --hidden-import mysql.connector.plugins --hidden-import mysql.connector.plugins.mysql_native_password --hidden-import tkcalendar --hidden-import babel.numbers ocean_plot.py
 ```
@@ -513,7 +520,7 @@ C:/Python313/python.exe -m PyInstaller --onefile --windowed --hidden-import mysq
 |--------|---------|------|
 | `tide6` | STID, DATATIME, MIN0~MIN9, QC | 6分鐘潮位原始資料 |
 | `tide6ha` | STID, DATATIME, MIN0~MIN9, QC | 潮位預報（QC='h' 諧和，QC='a' 天文） |
-| `st` | STID, stnac, stid_obs, stid_new, type, kind | 測站基本資料（type: 2=音波,3=壓力,4=雷達；kind: 1/2/3=氣象站,7=潮位站,8=浮標）|
+| `st` | STID, stnac, stid_obs, stid_new, type, kind | 測站基本資料（type: 2=音波,3=壓力,4=雷達；kind: 1/2/3=氣象站,6=潮位站,8=浮標）|
 | `stitemqc` | stid, qcid | 安內測站對應（MAPPING_SRC=db 時使用）|
 | `tidestat` | STID, YEAR, MONTH, MR, SL, QC | 潮位統計（MR=平均潮差，MONTH=0 代表全年，SL='S' AND QC='Q' 篩選有效值）|
 | `meteo` | stid, DATATIME, min, p, ws, wd, t | 氣象站氣壓/風速/風向/氣溫（min=0 為整點值，單位×0.1 還原）|
