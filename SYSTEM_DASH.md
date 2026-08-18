@@ -1,6 +1,6 @@
 # 🌊 海洋動力診斷儀表板 — SYSTEM_DASH.md
 
-> 技術文件版本：2026-08-14
+> 技術文件版本：2026-08-18
 > 架構版本：Tkinter + Dash（已從 Tkinter + Plotly HTML 遷移完成）
 
 ---
@@ -175,7 +175,7 @@ app.layout
 │       ├─ §D 框選資訊列
 │       ├─ §E SQL 輸出（dcc.Textarea + dcc.Clipboard 複製鈕）
 │       ├─ §F 匯出一般白底圖（water-export-btn + dcc.Download）
-│       └─ §G 匯出暴潮偏差圖（surge-export-btn + surge-export-status + dcc.Download）
+│       └─ §S2 匯出暴潮偏差圖（surge-export-btn + surge-export-status + dcc.Download）（移自水位 QC Tab §G）
 └─ 底部狀態列
         └─ 顯示當前伺服器記憶體快取佔用狀態（例如：快取佔用：3 / 10）
 ```
@@ -756,22 +756,24 @@ build_surge_report_figure(
 
 #### 路徑 B：Dash `export_surge_report` callback（瀏覽器下載）
 
-按鈕位置：水位 tab 右側 QC 面板 §G「🌊 匯出暴潮偏差圖 PNG」。
+按鈕位置：「暴潮偏差」tab 右側面板 §S2「🌊 匯出暴潮偏差圖 PNG」（移自水位 QC Tab §G）
 
 | 項目 | 值 |
 |------|-----|
-| Output | `surge-download.data`、`surge-export-status.children` |
-| Input | `surge-export-btn.n_clicks` |
-| State | `bundle-key-store` |
-| 資料來源 | `dash_bridge.get_typhoon_info()`、`dash_bridge.get_thresholds_map()` |
+| Output | `surge-download.data`、`surge-export-status.children`|
+| Input | `surge-export-btn.n_clicks`|
+| State | `bundle-key-store`、`surge-pred-source`|
+| 資料來源 | `dash_bridge.get_typhoon_info()`、`dash_bridge.get_thresholds_map()`|
 
-**多站處理（ZIP）：**
+**多站處理（ZIP）與參數：**
+- 預報來源：依 `surge-pred-source` 設定（`auto` / `pred_a` / `pred_h`）套用至報表
 - 單站 → 下載 `Surge_{stid}_{timestamp}.png`
 - 多站 → 對每站各自生成 PNG，打包為 `Surge_{ty_id}_{timestamp}.zip`（`zipfile.ZIP_DEFLATED`）
 
 **錯誤處理：**
-- `typhoon_info` 為 `None`（未選颱風即按水位模式查詢）→ `surge-export-status` 顯示警告，不觸發下載
-- `thresholds_map` 不含某站 → 對該站傳入 `None`，圖上不顯示警戒線（不中止整批匯出）
+- `typhoon_info` 或快取為 `None**` → `surge-export-status` 顯示警告，不觸發下載
+- `thresholds_map` 為 `None` 或不含某站** → 容錯處理並傳入 `None`，圖上不顯示警戒線（不中止整批匯出）
+- 單站/多站繪圖例外 → 捕捉 `Exception` 並於 `surge-export-status` 顯示錯誤訊息，避免 Callback 靜默崩潰
 
 ---
 
@@ -798,6 +800,31 @@ def set_bundle(key, bundle, land_range=None, typhoon_label=None,
 | 暴潮偏差圖是否跟隨水位圖 zoom 範圍 | **不跟隨（設計決策）** | 颱風報告需呈現完整事件期間，局部裁切會導致海陸警色帶不完整，誤導判讀 |
 | PNG 匯出是否同步 Y 軸手動範圍 | **不同步（已知限制）** | Y 軸 Patch 寫入後無法從 figure dict 直接反查範圍；對簡報用途影響小，列入限制記錄 |
 
+### 互動式暴潮偏差圖（tab-surge）：build_surge_interactive_figure()（本文件先前未收錄，一併補上）
+
+多站深色主題版，供 Dash `tab-surge` 使用，與白底 `build_surge_report_figure()` 分開維護，Trace 結構相同（觀測水位／預報水位／暴潮偏差／注意值／警戒值），差異僅在深色配色與 `make_subplots`（2 欄、`secondary_y=True`）多站排列。
+
+```python
+build_surge_interactive_figure(
+    bundles: list,
+    typhoon_info: dict | None,
+    thresholds_map: dict | None,
+    pred_source: str = 'auto',
+    legend_mode: str = 'shared',   # 'shared' | 'individual'，2026-08-18 新增
+) -> go.Figure
+```
+
+**圖例模式（`legend_mode`，2026-08-18 新增）：**
+
+| 模式 | 行為 |
+|------|------|
+| `'shared'`（預設） | 全圖共用一組橫向圖例，置於整張圖底部（`y=-0.08`）。舊版固定於頂部 `y=1.02`，多子圖時會蓋到左上角子圖標題，已修正為置底 |
+| `'individual'` | 每個子圖各自一組圖例，內嵌於該子圖右上角（半透明底色），使用 Plotly ≥5.24 多圖例功能（`trace.legend="legend2"...` 對應 `layout.legend2...`）。各子圖 `legendgroup` 依站點索引加後綴，避免跨子圖連動開關 |
+
+由 tab-surge 側邊欄新增的 `dcc.RadioItems(id="surge-legend-mode")` 控制，經 `render_figure` 傳入。
+
+**字體修正：** 本函式原本誤用白底匯出版的 `_FONT`（不含標楷體），與水位／VdC tab 的圖表字體不一致（見 §6.b 字體系統應為標楷體優先）。新增 `_FONT_INTERACTIVE`（標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif），僅套用於本函式；白底匯出圖沿用原 `_FONT`，不受影響。
+
 ---
 
 ## 9. 已知限制與待辦事項
@@ -820,6 +847,7 @@ def set_bundle(key, bundle, land_range=None, typhoon_label=None,
 改為 `yy >= 50 → 19xx` 的兩位數判斷，並加 `sorted(..., reverse=True)` 
 確保四位數年份正確降序排列。 |
 | 🟢 已修 | on_selection 多子圖框選 STID 錯誤、DATATIME 空白 | 新增 trace-meta-store（dcc.Store）：build_water_figure() 建圖後反查各 trace 的 xaxis 屬性，回傳 (fig, trace_meta) tuple；on_selection 依 curveNumber 從 trace_meta 解析被框選子圖的 STID，並修正 _adapt_selected_data() 以處理多子圖的 "x2"/"x3" range key。已知限制：同一子圖內多儀器無法區分，SQL 統一使用主儀器站碼。 |
+| 🟢 已修 | tab-surge 切換時顯示前一個 tab 的舊畫面 | `build_surge_interactive_figure()` 內 `bundle.get('df') or pd.DataFrame()` 對 DataFrame 做布林判斷——pandas 規定 DataFrame 不可參與真值運算，只要 `df` 非 `None` 必定拋出 `ValueError`。`render_figure` 的 `tab-surge` 分支原本沒包 `try/except`，例外未被攔截，Dash 因此不更新任何 Output，畫面停留在上一個成功渲染的 tab（水位圖或 VdC 圖），造成「點暴潮偏差卻看到別的 tab 畫面」的假象。已修正為 `df = bundle.get('df'); if df is None: df = pd.DataFrame()`，並比照 `tab-vdc` 分支補上 `try/except`：未來若再出錯會直接在圖上顯示錯誤標題並印出 traceback 到終端機，不再靜默吞錯。 |
 
 ### 架構面
 

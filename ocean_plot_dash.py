@@ -225,7 +225,7 @@ class OceanDataEngine:
         if self.host == "127.0.0.1": return [] # 本地模式直接跳過
         try:
             # --- [核心修改 3] 動態替換颱風資料庫名稱 ---
-            query = f"SELECT DISTINCT LEFT(id, 2) as yr FROM {self.typhoon_db}.typhoonid WHERE sponsor='LocalTime' ORDER BY yr DESC"
+            query = f"SELECT DISTINCT LEFT(id, 2) as yr FROM {self.typhoon_db}.typhoonid WHERE sponsor='LocalTime' COLLATE utf8mb4_general_ci ORDER BY yr DESC"
             df = pd.read_sql(query, self.conn)
             # return [f"20{y}" for y in df['yr']]
             # return [f"19{y}" if int(y) >= 50 else f"20{y}" for y in df['yr']]
@@ -242,14 +242,14 @@ class OceanDataEngine:
                             WARN1BEG as warnSeaBeg, WARN1END as warnSeaEnd,
                             WARN2BEG as warnLandBeg, WARN2END as warnLandEnd
                             FROM {self.typhoon_db}.typhoonid
-                            WHERE sponsor='LocalTime' AND id LIKE '{yr_full[-2:]}%%'
+                            WHERE sponsor='LocalTime' COLLATE utf8mb4_general_ci AND id LIKE '{yr_full[-2:]}%%'
                             ORDER BY id DESC"""
             else:
                 # 安外 med_data：欄位名原本就是小寫 warnSeaBeg 等
                 query = f"""SELECT DISTINCT id, cname,
                             warnSeaBeg, warnSeaEnd, warnLandBeg, warnLandEnd
                             FROM {self.typhoon_db}.typhoonid
-                            WHERE sponsor='LocalTime' AND id LIKE '{yr_full[-2:]}%%'
+                            WHERE sponsor='LocalTime' COLLATE utf8mb4_general_ci AND id LIKE '{yr_full[-2:]}%%'
                             ORDER BY id DESC"""
             return pd.read_sql(query, self.conn)
         except Exception: return pd.DataFrame()
@@ -396,7 +396,7 @@ class OceanDataEngine:
                 if not df_pred_h.empty:
                     pred_data[stid] = self.expand_data(df_pred_h, f'WL_{stid}_pred_h')
                 
-                # 天文潮預報 (a)
+                # 調和分析 (a)
                 df_pred_a = pd.read_sql(
                     f"SELECT * FROM {self.tables['tide6ha']} WHERE STID='{stid}' AND QC='a' AND DATATIME BETWEEN '{start_str}' AND '{end_str}'",
                     self.conn
@@ -1859,8 +1859,8 @@ if __name__ == "__main__":
                     # [修改] 使用 lambda 傳遞 mode="full"
                     tk.Button(btn_box, text="查看海洋參數", bg="#28a745", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
                             command=lambda: self.go(mode="full")).pack(side="left", padx=5)
-                    tk.Button(btn_box, text=" 匯出暴潮偏差圖", bg="#b81717", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),
-                          command=lambda: self.go(mode="storm")).pack(side="left", padx=10)
+                    # tk.Button(btn_box, text=" 匯出暴潮偏差圖", bg="#b81717", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),
+                    #       command=lambda: self.go(mode="storm")).pack(side="left", padx=10)
                     tk.Button(btn_box, text="匯出統計報表", bg="#17a2b8", fg="#FFFFFF", font=(UI_FONT, 10, "bold"),  
                             command=self.show_stats).pack(side="left", padx=5)
 

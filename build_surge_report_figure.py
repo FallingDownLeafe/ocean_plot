@@ -49,6 +49,8 @@ import plotly.graph_objects as go
 _FONT = "PingFang TC, Noto Sans CJK TC, Arial, sans-serif"
 # _FONT = "標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif" #主管表示他不喜歡標楷體，說大家都覺得很醜
 
+_FONT_INTERACTIVE = "標楷體, PingFang TC, Noto Sans CJK TC, Arial, sans-serif"  # 互動式(Dash深色)圖表專用，與水位/VdC tab 一致；白底匯出圖仍用上面不含標楷體的 _FONT
+
 # 白底報表色系（獨立維護，不影響 build_water_figure.py 的深色系）
 _COLOR_OBS = '#1f77b4'        # 觀測水位（校正值 QC=Q）
 _COLOR_PRED = '#2ca02c'       # 調和預報
@@ -103,6 +105,7 @@ def build_surge_report_figure(
     bundle: dict,
     typhoon_info: dict,
     thresholds: dict | None,
+    pred_source: str = 'auto',
 ) -> go.Figure:
     """
     單站颱風暴潮偏差報表圖（白底，供 kaleido 匯出 PNG）。
@@ -135,16 +138,47 @@ def build_surge_report_figure(
         None
     )
 
+    # ---- Patch 2　替換 col_obs / col_pred / stid_display 決策區塊開始 ----
+    # if primary_stid is not None:
+    #     col_obs = f'WL_{primary_stid}'
+    #     col_pred = f'WL_{primary_stid}_pred_h'
+    #     meta = tide_meta[primary_stid]
+    #     stid_obs = meta.get('stid_obs', '未知')
+    #     stid_new = meta.get('stid_new', '未知')
+    #     stid_display = bundle['stid']
+    # else:
+    #     col_obs, col_pred = 'Obs', 'Pre'
+    #     stid_obs = stid_new = '未知（舊系統降級模式）'
+    # ---- Patch 2　替換 col_obs / col_pred / stid_display 決策區塊結束 ----
     if primary_stid is not None:
-        col_obs = f'WL_{primary_stid}'
-        col_pred = f'WL_{primary_stid}_pred_h'
-        meta = tide_meta[primary_stid]
-        stid_obs = meta.get('stid_obs', '未知')
-        stid_new = meta.get('stid_new', '未知')
+        col_obs    = f'WL_{primary_stid}'
+        col_pred_a = f'WL_{primary_stid}_pred_a'
+        col_pred_h = f'WL_{primary_stid}_pred_h'
+
+        if pred_source == 'pred_h':
+            col_pred   = col_pred_h if col_pred_h in df.columns else None
+            pred_label = '調和預報(h)'
+        elif pred_source == 'pred_a':
+            col_pred   = col_pred_a if col_pred_a in df.columns else None
+            pred_label = '調和分析(a)'
+        else:  # 'auto'：優先 pred_a，無則 pred_h
+            if col_pred_a in df.columns:
+                col_pred, pred_label = col_pred_a, '調和分析(a)'
+            elif col_pred_h in df.columns:
+                col_pred, pred_label = col_pred_h, '調和預報(h)'
+            else:
+                col_pred, pred_label = None, '（無預報資料）'
+
+        meta         = tide_meta[primary_stid]
+        stid_obs     = meta.get('stid_obs', '未知')
+        stid_new     = meta.get('stid_new', '未知')
         stid_display = bundle['stid']
     else:
-        col_obs, col_pred = 'Obs', 'Pre'
-        stid_obs = stid_new = '未知（舊系統降級模式）'
+        col_obs      = 'Obs'
+        col_pred     = 'Pre' if 'Pre' in df.columns else None
+        pred_label   = '調和預報'
+        stid_obs     = stid_new = '未知（舊系統降級模式）'
+        stid_display = bundle.get('stid', '未知')   # 修正：降級路徑補定義
 
     fig = go.Figure()
 
@@ -158,17 +192,33 @@ def build_surge_report_figure(
         ))
 
     # --- §2 調和預報（左軸，同軸方便比對震盪幅度） ---
-    if col_pred in df.columns:
+    if col_pred is not None and col_pred in df.columns:
         fig.add_trace(go.Scatter(
             x=df['Time'], y=df[col_pred],
-            mode='lines', name='調和預報',
+            mode='lines', name=pred_label,
             line=dict(color=_COLOR_PRED, width=1.2),
         ))
 
     # --- §3 暴潮偏差 Resi（右軸） ---
-    if 'Resi' in df.columns:
+    # if 'Resi' in df.columns:
+    #     fig.add_trace(go.Scatter(
+    #         x=df['Time'], y=df['Resi'],
+    #         mode='lines', name='暴潮偏差',
+    #         line=dict(color=_COLOR_RESI, width=1.5),
+    #         yaxis='y2',
+    #     ))
+
+    # --- §3 暴潮偏差（右軸，依 pred_source 動態計算，與圖例一致） ---
+    if col_obs in df.columns and col_pred is not None and col_pred in df.columns:
+        resi_series = df[col_obs] - df[col_pred]
+    elif 'Resi' in df.columns:
+        resi_series = df['Resi']        # 備援：Resi = WL − pred_h
+    else:
+        resi_series = None
+
+    if resi_series is not None and resi_series.notna().any():
         fig.add_trace(go.Scatter(
-            x=df['Time'], y=df['Resi'],
+            x=df['Time'], y=resi_series,
             mode='lines', name='暴潮偏差',
             line=dict(color=_COLOR_RESI, width=1.5),
             yaxis='y2',
@@ -378,4 +428,264 @@ def build_surge_report_figure(
 
     return fig
 
+def build_surge_interactive_figure(
+    bundles: list,
+    typhoon_info: dict | None,
+    thresholds_map: dict | None,
+    pred_source: str = 'auto',
+    legend_mode: str = 'shared',   # 'shared'：全圖共用一組圖例（置底）／'individual'：每個子圖各自一組（內嵌右上角）
+) -> go.Figure:
+    """
+    多站互動式暴潮偏差圖（深色主題，供 Dash dcc.Graph 使用）。
+
+    與 build_surge_report_figure() 的差異：
+      - 接受 bundles list（多站），以 2-column 子圖方式排列
+      - 使用 plotly_dark 主題，適合 Dash 互動瀏覽
+      - pred_source 邏輯與 build_surge_report_figure() 相同
+      - 圖例以 legendgroup 分組，避免多站重複條目
+      - legend_mode='shared' 時共用一組圖例；'individual' 時每個子圖各自一組，
+        避免多子圖情境下單一共用圖例卡到左上角子圖標題
+    """
+    from math import ceil
+    from plotly.subplots import make_subplots
+
+    if not bundles:
+        fig = go.Figure()
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#1E2A3A",
+            plot_bgcolor="#1E1E1E",
+            title=dict(text="請先從主程式查詢颱風事件資料", x=0.5, xanchor='center'),
+        )
+        return fig
+
+    if typhoon_info is None:
+        typhoon_info = {}
+
+    n      = len(bundles)
+    n_cols = min(2, n)
+    n_rows = ceil(n / n_cols)
+
+    specs = [[{"secondary_y": True}] * n_cols for _ in range(n_rows)]
+
+    subplot_titles = [
+        f"{b.get('stname', '')}（{b.get('stid', '')}）"
+        for b in bundles
+    ]
+    if n % n_cols != 0:
+        subplot_titles.append("")   # 奇數站：最後一格空白標題
+
+    fig = make_subplots(
+        rows=n_rows, cols=n_cols,
+        specs=specs,
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.15 if n_rows > 1 else 0.10,
+        horizontal_spacing=0.08,
+    )
+
+    # 深色主題色系（與白底報表版分開維護）
+    _CLR_OBS_D     = '#5b9bd5'
+    _CLR_PRED_D    = '#70c270'
+    _CLR_RESI_D    = '#e74c3c'
+    _CLR_STIDE_D   = '#f0c040'
+    _CLR_WARNVAL_D = '#e8864f'
+
+    legend_layout_updates = {}   # legend_mode='individual' 時，收集每個子圖的專屬圖例位置設定
+
+    for i, bundle in enumerate(bundles):
+        row         = i // n_cols + 1
+        col         = i % n_cols + 1
+
+        show_legend  = True if legend_mode == 'individual' else (i == 0)
+        grp_suffix   = str(i) if legend_mode == 'individual' else ''
+        legend_name  = ("legend" if i == 0 else f"legend{i + 1}") if legend_mode == 'individual' else "legend"
+        legend_kw    = {"legend": legend_name} if (legend_mode == 'individual' and i > 0) else {}
+
+        df        = bundle.get('df')
+        if df is None:
+            df = pd.DataFrame()
+        tide_meta = bundle.get('tide_meta') or {}
+        stid_b    = bundle.get('stid', '')
+
+        if legend_mode == 'individual' and legend_name not in legend_layout_updates:
+            sp = fig.get_subplot(row=row, col=col)
+            x0, x1 = sp.xaxis.domain
+            y0, y1 = sp.yaxis.domain
+            legend_layout_updates[legend_name] = dict(
+                x=x1, y=y1, xanchor='right', yanchor='top',
+                bgcolor='rgba(30,42,58,0.75)', bordercolor='rgba(255,255,255,0.15)',
+                borderwidth=1, font=dict(size=10),
+            )
+
+        primary_stid = next(
+            (st for st, meta in tide_meta.items() if meta.get('is_primary')), None
+        )
+
+        # ── pred_source 決策（與 build_surge_report_figure 邏輯一致）────────
+        if primary_stid:
+            col_obs    = f'WL_{primary_stid}'
+            col_pred_a = f'WL_{primary_stid}_pred_a'
+            col_pred_h = f'WL_{primary_stid}_pred_h'
+
+            if pred_source == 'pred_h':
+                col_pred, pred_label = (
+                    (col_pred_h, '調和預報(h)') if col_pred_h in df.columns
+                    else (None, '調和預報(h)（無資料）')
+                )
+            elif pred_source == 'pred_a':
+                col_pred, pred_label = (
+                    (col_pred_a, '天文潮預報(a)') if col_pred_a in df.columns
+                    else (None, '天文潮預報(a)（無資料）')
+                )
+            else:  # auto
+                if col_pred_a in df.columns:
+                    col_pred, pred_label = col_pred_a, '天文潮預報(a)'
+                elif col_pred_h in df.columns:
+                    col_pred, pred_label = col_pred_h, '調和預報(h)'
+                else:
+                    col_pred, pred_label = None, '（無預報資料）'
+        else:
+            col_obs    = 'Obs'
+            col_pred   = 'Pre' if 'Pre' in df.columns else None
+            pred_label = '調和預報'
+
+        if df.empty:
+            continue
+
+        # §1 觀測水位（左軸）
+        if col_obs in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['Time'], y=df[col_obs],
+                    mode='lines', name='觀測水位',
+                    line=dict(color=_CLR_OBS_D, width=1.5),
+                    connectgaps=False,
+                    legendgroup=f'obs{grp_suffix}',
+                    showlegend=show_legend,
+                    **legend_kw,
+                ),
+                row=row, col=col, secondary_y=False,
+            )
+
+        # §2 預報水位（左軸）
+        if col_pred is not None and col_pred in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['Time'], y=df[col_pred],
+                    mode='lines', name=pred_label,
+                    line=dict(color=_CLR_PRED_D, width=1.2, dash='dot'),
+                    legendgroup=f'pred{grp_suffix}',
+                    showlegend=show_legend,
+                    **legend_kw,
+                ),
+                row=row, col=col, secondary_y=False,
+            )
+
+        # §3 暴潮偏差（右軸，動態計算）
+        if col_pred is not None and col_pred in df.columns and col_obs in df.columns:
+            resi_series = df[col_obs] - df[col_pred]
+        elif 'Resi' in df.columns:
+            resi_series = df['Resi']
+        else:
+            resi_series = None
+
+        if resi_series is not None and resi_series.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=df['Time'], y=resi_series,
+                    mode='lines', name='暴潮偏差',
+                    line=dict(color=_CLR_RESI_D, width=1.5),
+                    legendgroup=f'resi{grp_suffix}',
+                    showlegend=show_legend,
+                    **legend_kw,
+                ),
+                row=row, col=col, secondary_y=True,
+            )
+
+        # §4 門檻線（注意值 / 警戒值，左軸）
+        thresholds = (thresholds_map or {}).get(stid_b)
+        if thresholds and not df.empty:
+            x_start = df['Time'].min()
+            x_end   = df['Time'].max()
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_start, x_end],
+                    y=[thresholds['注意值_mm']] * 2,
+                    mode='lines', name='潮位注意值',
+                    line=dict(color=_CLR_STIDE_D, dash='dash', width=1.2),
+                    hoverinfo='skip',
+                    legendgroup=f'stide{grp_suffix}',
+                    showlegend=show_legend,
+                    **legend_kw,
+                ),
+                row=row, col=col, secondary_y=False,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_start, x_end],
+                    y=[thresholds['警戒值_mm']] * 2,
+                    mode='lines', name='潮位警戒值',
+                    line=dict(color=_CLR_WARNVAL_D, dash='dash', width=1.2),
+                    hoverinfo='skip',
+                    legendgroup=f'warnval{grp_suffix}',
+                    showlegend=show_legend,
+                    **legend_kw,
+                ),
+                row=row, col=col, secondary_y=False,
+            )
+
+        # §5 颱風警報色帶
+        sea_beg = typhoon_info.get('warnSeaBeg')
+        sea_end = typhoon_info.get('warnSeaEnd')
+        if sea_beg is not None and sea_end is not None and pd.notna(sea_beg) and pd.notna(sea_end):
+            fig.add_vrect(
+                x0=pd.Timestamp(sea_beg), x1=pd.Timestamp(sea_end),
+                fillcolor='rgba(70, 130, 180, 0.10)',
+                line_width=0, layer='below',
+                row=row, col=col,
+            )
+
+        land_beg = typhoon_info.get('warnLandBeg')
+        land_end = typhoon_info.get('warnLandEnd')
+        if land_beg is not None and land_end is not None and pd.notna(land_beg) and pd.notna(land_end):
+            fig.add_vrect(
+                x0=pd.Timestamp(land_beg), x1=pd.Timestamp(land_end),
+                fillcolor='rgba(220, 80, 80, 0.08)',
+                line_width=0, layer='below',
+                row=row, col=col,
+            )
+
+        # §6 軸標籤
+        fig.update_yaxes(title_text='水位 (mm)',    secondary_y=False, row=row, col=col)
+        fig.update_yaxes(title_text='暴潮偏差 (mm)', secondary_y=True,  row=row, col=col,
+                         showgrid=False)
+
+    ty_id   = typhoon_info.get('id',    '')
+    ty_name = typhoon_info.get('cname', '')
+    title_text = (
+        f"{ty_id} {ty_name} 暴潮偏差" if (ty_id or ty_name)
+        else "暴潮偏差（未指定颱風）"
+    )
+
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='#1E2A3A',
+        plot_bgcolor='#1E1E1E',
+        font=dict(family=_FONT_INTERACTIVE, color='#CCD0D4'),
+        title=dict(text=title_text, x=0.5, xanchor='center', font=dict(size=15)),
+        hovermode='x unified',
+        height=480 * n_rows,
+    )
+
+    if legend_mode == 'individual':
+        # 每個子圖各自一組圖例，內嵌在該子圖右上角，不佔用標題列空間
+        fig.update_layout(**legend_layout_updates)
+    else:
+        # 共用圖例：整體置底並置中，避開左上角子圖標題
+        fig.update_layout(
+            legend=dict(orientation='h', y=-0.08, x=0.5, xanchor='center', yanchor='top', font=dict(size=12)),
+            margin=dict(b=90),
+        )
+
+    return fig
 

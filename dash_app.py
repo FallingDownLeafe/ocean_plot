@@ -28,6 +28,7 @@ from dash.exceptions import PreventUpdate
 import dash_bridge
 from build_water_figure import build_water_figure
 from build_vdc_figure import build_vdc_figure
+from build_surge_report_figure import build_surge_interactive_figure
 
 # ── 環境設定 ──────────────────────────────────────────────────────────────────
 import urllib.parse
@@ -1113,37 +1114,37 @@ app.layout = html.Div(
                             ],
                         ),
 
-                        # §G  匯出暴潮偏差圖 PNG（颱風事件用）
-                        html.Div(
-                            style={
-                                "backgroundColor": "#1e2a3a",
-                                "border": f"1px solid {_CLR_BORDER}",
-                                "borderRadius": "8px",
-                                "padding": "14px 16px",
-                            },
-                            children=[
-                                html.Button(
-                                    "🌊 匯出暴潮偏差圖 PNG",
-                                    id="surge-export-btn",
-                                    n_clicks=0,
-                                    style={
-                                        "width": "100%",
-                                        "fontFamily": _FONT_UI, "fontSize": "13px",
-                                        "padding": "8px 0", "backgroundColor": "#1a3a5c",
-                                        "color": "#7eb8f7", "border": f"1px solid {_CLR_BORDER}",
-                                        "borderRadius": "4px", "cursor": "pointer",
-                                    },
-                                ),
-                                html.Div(
-                                    id="surge-export-status",
-                                    style={
-                                        "fontSize": "11px", "color": "#888",
-                                        "minHeight": "16px", "marginTop": "6px",
-                                    },
-                                ),
-                                dcc.Download(id="surge-download"),
-                            ],
-                        ),
+                        # # §G  匯出暴潮偏差圖 PNG（颱風事件用）
+                        # html.Div(
+                        #     style={
+                        #         "backgroundColor": "#1e2a3a",
+                        #         "border": f"1px solid {_CLR_BORDER}",
+                        #         "borderRadius": "8px",
+                        #         "padding": "14px 16px",
+                        #     },
+                        #     children=[
+                        #         html.Button(
+                        #             "🌊 匯出暴潮偏差圖 PNG",
+                        #             id="surge-export-btn",
+                        #             n_clicks=0,
+                        #             style={
+                        #                 "width": "100%",
+                        #                 "fontFamily": _FONT_UI, "fontSize": "13px",
+                        #                 "padding": "8px 0", "backgroundColor": "#1a3a5c",
+                        #                 "color": "#7eb8f7", "border": f"1px solid {_CLR_BORDER}",
+                        #                 "borderRadius": "4px", "cursor": "pointer",
+                        #             },
+                        #         ),
+                        #         html.Div(
+                        #             id="surge-export-status",
+                        #             style={
+                        #                 "fontSize": "11px", "color": "#888",
+                        #                 "minHeight": "16px", "marginTop": "6px",
+                        #             },
+                        #         ),
+                        #         dcc.Download(id="surge-download"),
+                        #     ],
+                        # ),
                         
                     # ],  # end QC 面板 children
 
@@ -1286,7 +1287,152 @@ app.layout = html.Div(
                                             ],
                                         ),
                                     ],
+                        #         ),  # end Tab 2
+                        #     ],  # end dcc.Tabs children
+                        # ),  # end dcc.Tabs
                                 ),  # end Tab 2
+
+                                # ── Tab 3：暴潮偏差 ──────────────────────────
+                                dcc.Tab(
+                                    label="暴潮偏差",
+                                    value="tab-surge",
+                                    style={
+                                        "backgroundColor": "#1e2a3a",
+                                        "color": "#ccd",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                    },
+                                    selected_style={
+                                        "backgroundColor": "#1a3a5c",
+                                        "color": "#7eb8f7",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                        "fontWeight": "bold",
+                                        "borderTop": "2px solid #7eb8f7",
+                                    },
+                                    children=[
+                                        html.Div(
+                                            style={
+                                                "padding": "12px 0",
+                                                "display": "flex",
+                                                "flexDirection": "column",
+                                                "gap": "12px",
+                                            },
+                                            children=[
+                                                # §S1 預報來源選擇
+                                                html.Div(
+                                                    style={
+                                                        "backgroundColor": "#1e2a3a",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                    },
+                                                    children=[
+                                                        html.H3(
+                                                            "預報來源",
+                                                            style={
+                                                                "margin": "0 0 10px",
+                                                                "fontSize": "13px",
+                                                                "color": "#7eb8f7",
+                                                                "borderBottom": f"2px solid {_CLR_NAVY}",
+                                                                "paddingBottom": "6px",
+                                                            },
+                                                        ),
+                                                        dcc.RadioItems(
+                                                            id="surge-pred-source",
+                                                            options=[
+                                                                {"label": " 自動（優先天文潮 a）", "value": "auto"},
+                                                                {"label": " 天文潮預報 (pred_a)",   "value": "pred_a"},
+                                                                {"label": " 調和預報 (pred_h)",     "value": "pred_h"},
+                                                            ],
+                                                            value="auto",
+                                                            inputStyle={"marginRight": "6px"},
+                                                            labelStyle={
+                                                                "display": "block",
+                                                                "marginBottom": "8px",
+                                                                "fontSize": "13px",
+                                                                "color": "#ccd",
+                                                            },
+                                                        ),
+                                                    ],
+                                                ),
+                                                # §S1.5 圖例顯示模式
+                                                html.Div(
+                                                    style={
+                                                        "backgroundColor": "#1e2a3a",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                    },
+                                                    children=[
+                                                        html.H3(
+                                                            "圖例顯示模式",
+                                                            style={
+                                                                "margin": "0 0 10px",
+                                                                "fontSize": "13px",
+                                                                "color": "#7eb8f7",
+                                                                "borderBottom": f"2px solid {_CLR_NAVY}",
+                                                                "paddingBottom": "6px",
+                                                            },
+                                                        ),
+                                                        dcc.RadioItems(
+                                                            id="surge-legend-mode",
+                                                            options=[
+                                                                {"label": " 共用圖例（置底）", "value": "shared"},
+                                                                {"label": " 各子圖獨立圖例",   "value": "individual"},
+                                                            ],
+                                                            value="shared",
+                                                            inputStyle={"marginRight": "6px"},
+                                                            labelStyle={
+                                                                "display": "block",
+                                                                "marginBottom": "8px",
+                                                                "fontSize": "13px",
+                                                                "color": "#ccd",
+                                                            },
+                                                        ),
+                                                    ],
+                                                ),
+                                                # §S2 匯出 PNG（移自水位 QC Tab §G）
+                                                html.Div(
+                                                    style={
+                                                        "backgroundColor": "#1e2a3a",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                    },
+                                                    children=[
+                                                        html.Button(
+                                                            "🌊 匯出暴潮偏差圖 PNG",
+                                                            id="surge-export-btn",
+                                                            n_clicks=0,
+                                                            style={
+                                                                "width": "100%",
+                                                                "fontFamily": _FONT_UI,
+                                                                "fontSize": "13px",
+                                                                "padding": "8px 0",
+                                                                "backgroundColor": "#1a3a5c",
+                                                                "color": "#7eb8f7",
+                                                                "border": f"1px solid {_CLR_BORDER}",
+                                                                "borderRadius": "4px",
+                                                                "cursor": "pointer",
+                                                            },
+                                                        ),
+                                                        html.Div(
+                                                            id="surge-export-status",
+                                                            style={
+                                                                "fontSize": "11px",
+                                                                "color": "#888",
+                                                                "minHeight": "16px",
+                                                                "marginTop": "6px",
+                                                            },
+                                                        ),
+                                                        dcc.Download(id="surge-download"),
+                                                    ],
+                                                ),
+                                            ],
+                                        ),
+                                    ],
+                                ),  # end Tab 3
                             ],  # end dcc.Tabs children
                         ),  # end dcc.Tabs
                     ],  # end QC 面板 children
@@ -1466,10 +1612,12 @@ def unlock_page(n_clicks):
     Input("url", "search"),
     Input("right-panel-tabs", "value"),
     Input("vdc-diff-type", "value"),
+    Input("surge-pred-source", "value"),
+    Input("surge-legend-mode", "value"),
     # Input("zoom-range-store", "data"),
     State("zoom-range-store", "data"), # 不當作必要觸發項目
 )
-def render_figure(poll_key, url_search, active_tab, diff_type, zoom_range):
+def render_figure(poll_key, url_search, active_tab, diff_type, surge_pred_source, surge_legend_mode, zoom_range):
     # 優先從 URL 抓取 Key，若無則用輪詢到的最新 Key
     target_key = poll_key
     lock_text = "🔄 自動跟隨主程式"
@@ -1537,6 +1685,24 @@ def render_figure(poll_key, url_search, active_tab, diff_type, zoom_range):
             traceback.print_exc()   # 印到 server 終端機
             print(f"[VdC ERROR] {e}")
             return no_update, no_update, f"錯誤：{e}", lock_text, lock_style, no_update # Patch 4-D 新增結尾 , no_update
+    elif active_tab == "tab-surge":
+        try:
+            typhoon_info   = dash_bridge.get_typhoon_info()
+            thresholds_map = dash_bridge.get_thresholds_map()
+            fig = build_surge_interactive_figure(
+                bundles,
+                typhoon_info,
+                thresholds_map,
+                pred_source=surge_pred_source or 'auto',
+                legend_mode=surge_legend_mode or 'shared',
+            )
+            return fig, primary_stid, no_update, lock_text, lock_style, no_update
+        except Exception as e:
+            import traceback
+            traceback.print_exc()   # 印到 server 終端機，方便日後排查
+            print(f"[Surge ERROR] {e}")
+            err_fig = go.Figure(layout=dict(title=f"⚠️ 暴潮偏差圖表錯誤：{e}"))
+            return err_fig, no_update, no_update, lock_text, lock_style, no_update
     else:
         lr = dash_bridge.get_land_range()
         typhoon_label = dash_bridge.get_typhoon_label()
@@ -1660,7 +1826,8 @@ def apply_vdc_x_range(n_apply, n_clear, x_range, current_fig, active_tab):
     prevent_initial_call=True,
 )
 def capture_zoom(relayout_data, active_tab):
-    if active_tab == "tab-vdc" or not relayout_data: 
+    # if active_tab == "tab-vdc" or not relayout_data:
+    if active_tab != "tab-water" or not relayout_data: 
         raise PreventUpdate
 
     # 使用者 double-click 或按 autoscale 重設縮放 → 清除記錄
@@ -1787,9 +1954,10 @@ def export_water_report(n_clicks, key, zoom_range, current_fig):
     Output("surge-export-status", "children"),
     Input("surge-export-btn",     "n_clicks"),
     State("bundle-key-store",     "data"),
+    State("surge-pred-source",    "value"),
     prevent_initial_call=True,
 )
-def export_surge_report(n_clicks, key):
+def export_surge_report(n_clicks, key, pred_source):
     import io
     import zipfile
     from datetime import datetime
@@ -1813,7 +1981,7 @@ def export_surge_report(n_clicks, key):
     if len(bundles) == 1:
         b = bundles[0]
         stid = b.get("stid", "unknown")
-        fig = build_surge_report_figure(b, typhoon_info, thresholds_map.get(stid))
+        fig = build_surge_report_figure(b, typhoon_info, thresholds_map.get(stid), pred_source or 'auto')
         buf = io.BytesIO()
         fig.write_image(buf, format="png", scale=2, width=1400, height=500) # 原本Claude設計height=700，但是我Tkinter設計按鈕產的是500，可以看看差異
         buf.seek(0)
@@ -1827,7 +1995,7 @@ def export_surge_report(n_clicks, key):
             for b in bundles:
                 stid = b.get("stid", "unknown")
                 try:
-                    fig = build_surge_report_figure(b, typhoon_info, thresholds_map.get(stid))
+                    fig = build_surge_report_figure(b, typhoon_info, thresholds_map.get(stid), pred_source or 'auto')
                     img_buf = io.BytesIO()
                     fig.write_image(img_buf, format="png", scale=2, width=1400, height=500)
                     img_buf.seek(0)

@@ -43,10 +43,16 @@ _lock = threading.Lock()
 _latest_key: str | None = None
 _land_range = None
 _typhoon_label: str | None = None      # ← 新增
+_typhoon_info: dict | None = None       # ← 新增（颱風事件 info dict）
+_thresholds_map: dict = {}              # ← 新增（各站門檻值，key=stid）
 MAX_CACHE_SIZE = 10                  # [調整] 針對 24GB RAM 調整為較寬裕的快取量
 
 
-def set_bundle(key: str, bundle: Any, land_range=None, typhoon_label=None) -> None:
+# 1-B調整
+# def set_bundle(key: str, bundle: Any, land_range=None, typhoon_label=None) -> None:
+def set_bundle(key: str, bundle: Any, land_range=None, typhoon_label=None,
+               typhoon_info=None, thresholds_map=None) -> None:
+    
     """
     將 bundle 存入快取。
 
@@ -55,7 +61,8 @@ def set_bundle(key: str, bundle: Any, land_range=None, typhoon_label=None) -> No
     key    : 識別此筆資料的字串，例如 "main" 或測站代碼 "1176"。
     bundle : OceanDataEngine.fetch_bundle() 的回傳 dict（或任何可序列化物件）。
     """
-    global _latest_key, _land_range, _typhoon_label          # ← 必須在 with 區塊外面   # ← 加入 _typhoon_label
+    # global _latest_key, _land_range, _typhoon_label          # ← 必須在 with 區塊外面   # ← 加入 _typhoon_label
+    global _latest_key, _land_range, _typhoon_label, _typhoon_info, _thresholds_map
     with _lock:
         # 改為滑動快取：若超過上限，刪除最舊的資料
         if len(_bundle_cache) >= MAX_CACHE_SIZE:
@@ -66,6 +73,10 @@ def set_bundle(key: str, bundle: Any, land_range=None, typhoon_label=None) -> No
         _latest_key = key
         _land_range = land_range
         _typhoon_label = typhoon_label      # ← 新增
+        if typhoon_info is not None:
+            _typhoon_info = typhoon_info
+        if thresholds_map is not None:
+            _thresholds_map = thresholds_map
 
 def get_bundle(key: str) -> Any:
     """
@@ -97,3 +108,11 @@ def get_typhoon_label() -> str | None:
 def get_cache_count() -> int:
     with _lock:
         return len(_bundle_cache)
+
+def get_typhoon_info() -> dict | None:
+    with _lock:
+        return _typhoon_info
+
+def get_thresholds_map() -> dict:
+    with _lock:
+        return dict(_thresholds_map)
