@@ -447,7 +447,7 @@ VALUES (
 
 ---
 
-## 5. 資料庫欄位與 QC 慣例速查
+## 5. 資料庫欄位與 QC 查詢慣例
 
 | 資料表 | QC 欄位 | 合格值 | 說明 |
 |--------|---------|--------|------|
@@ -455,11 +455,11 @@ VALUES (
 | `tide6ha` | `QC` | `'h'`（諧和預報）/ `'a'`（天文潮）| 水位預報 |
 | `wind` | `qc`（小寫）| `'Q'`（大寫）| 風速風向，比對時需 `.upper()` |
 | `stemp6` | `QC` | `'Q'`（大寫）| 6min 溫度，潮位站用，有 QC 拆分邏輯 |
-| `stemp1` | 無 | — | 浮標 1h 溫度，上游已做品管，不進行 QC 拆分 |
+| `stemp1` | 非必要 | — | 浮標 1h 溫度，上游已供應品管Q資料，不進行 QC 拆分 |
 | `meteo` | 無 | — | 氣象站，直接使用，無 QC 欄位 |
 | `pres6` | `QC` | `'Q'` | 氣壓（潮位站）|
-| `curr` | 無 | — | 海流，上游已做品管 |
-| `wave` | 無 | — | 波浪，上游已做品管 |
+| `curr` | 非必要 | — | 海流，上游已供應品管Q資料 |
+| `wave` | 非必要 | — | 波浪，上游已供應品管Q資料 |
 
 ### mysql.connector 小寫欄位名問題
 
@@ -474,6 +474,17 @@ df_obs.columns = [c.upper() for c in df_obs.columns]
 此行已加入所有讀取 `tide6`、`stemp6`、`stemp1` 的程式碼段後。
 
 > 完整資料表欄位定義請參閱 SYSTEM.md §十。
+
+### 浮球/浮標觀測表 QC 通則（buoy_qc 工具）
+
+> 以下六表的 `qc` 均為複合 PK 成員，UPDATE 必須含 `AND qc = '{old_qc}'`。
+
+| 資料表 | PK（含 qc）| 更新單位 | 備註 |
+|--------|-----------|---------|------|
+| `wave1`、`wave` | STID, TIME, qc | TIME | 無 Z |
+| `wind`、`curr`  | STID, TIME, Z, qc | TIME | Z INT |
+| `pres1`  | STID, DATATIME, qc | DATATIME（日 00:00）| HR0~HR23 寬格式；無 Z |
+| `stemp1` | STID, DATATIME, Z, qc | DATATIME（日 00:00）| HR0~HR23 寬格式；Z INT，-3=氣溫/0=海溫計1/1=海溫計2 |
 
 ---
 
@@ -920,6 +931,20 @@ pyinstaller --collect-all mysql.connector ...
 **建置快取建議**：每次重新打包前建議先清空專案下的 `build/` 與 `dist/` 目錄再執行，
 避免沿用舊版分析快取。 -->
 
+
+### 不使用 python-dotenv
+python-dotenv 未列入 requirements.txt。新模組讀取 .env 一律用手動解析器：
+
+python
+def _load_env(path):
+    if not path.exists(): return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line: continue
+            k, _, v = line.partition("=")
+            os.environ[k.strip()] = v.strip().strip('"').strip("'")
+
 ### 次生錯誤症狀與誤導風險
 
 打包後連線失敗時，錯誤訊息可能顯示為：
@@ -947,6 +972,7 @@ except Exception as e:
 - `babel` 語系資料：`frozen` 環境下需設定 `BABEL_DATA_PATH`（程式頂端已處理）
 - `.env` 檔與 `對應站表格.csv` 必須與執行檔放在同一目錄（`BASE_DIR` 以 `sys.executable` 所在目錄為準）
 - Tkinter + Dash 雙執行緒打包後，`use_reloader=False` 是必要的（已設定）；`debug=False` 在整合執行時也必須關閉
+- 環境變數載入： 本系統採手動解析 .env 檔案寫入 os.environ，不依賴 python-dotenv 套件，以確保未來使用 PyInstaller 打包成執行檔時的相容性與穩定性。
 
 ---
 

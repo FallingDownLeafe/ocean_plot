@@ -29,6 +29,7 @@ import dash_bridge
 from build_water_figure import build_water_figure
 from build_vdc_figure import build_vdc_figure
 from build_surge_report_figure import build_surge_interactive_figure
+from build_diagnostic_figure import build_diagnostic_figure  # Patch 6 新增：唯讀四子圖診斷頁籤
 
 # ── 環境設定 ──────────────────────────────────────────────────────────────────
 import urllib.parse
@@ -695,7 +696,7 @@ app.layout = html.Div(
                 # ── 右：QC 控制面板 ───────────────────────────────────────────
                 html.Div(
                     style={
-                        "width": "320px",
+                        "width": "360px",
                         "flexShrink": 0,
                         "marginLeft": "16px",
                         "display": "flex",
@@ -1433,6 +1434,85 @@ app.layout = html.Div(
                                         ),
                                     ],
                                 ),  # end Tab 3
+
+                                # ── Tab 4：海洋參數（唯讀四子圖診斷圖，Patch 7 新增）──────
+                                dcc.Tab(
+                                    label="海洋參數（唯讀）",
+                                    value="tab-diagnostic",
+                                    style={
+                                        "backgroundColor": "#1e2a3a",
+                                        "color": "#ccd",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                    },
+                                    selected_style={
+                                        "backgroundColor": "#1a3a5c",
+                                        "color": "#7eb8f7",
+                                        "fontSize": "13px",
+                                        "padding": "8px 10px",
+                                        "fontWeight": "bold",
+                                        "borderTop": "2px solid #7eb8f7",
+                                    },
+                                    children=[
+                                        html.Div(
+                                            style={
+                                                "padding": "12px 0",
+                                                "display": "flex",
+                                                "flexDirection": "column",
+                                                "gap": "12px",
+                                            },
+                                            children=[
+                                                html.Div(
+                                                    style={
+                                                        "backgroundColor": "#1e2a3a",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                    },
+                                                    children=[
+                                                        html.H3(
+                                                            "唯讀檢視說明",
+                                                            style={
+                                                                "margin": "0 0 10px",
+                                                                "fontSize": "13px",
+                                                                "color": "#7eb8f7",
+                                                                "borderBottom": f"2px solid {_CLR_NAVY}",
+                                                                "paddingBottom": "6px",
+                                                            },
+                                                        ),
+                                                        html.P(
+                                                            "此頁籤對應舊版「查看海洋參數」的四子圖診斷圖"
+                                                            "（水位／海氣象／暴潮與氣壓／波浪特性），"
+                                                            "僅供整體趨勢檢視，不提供 QC 框選與 SQL 產生功能。",
+                                                            style={"fontSize": "12px", "color": "#ccd",
+                                                                   "lineHeight": "1.7", "margin": 0},
+                                                        ),
+                                                        html.P(
+                                                            "如需修改水位 QC，請切換至「水位時序與 QC」頁籤操作。"
+                                                            "站數較多時圖表會相當長，請透過捲動瀏覽。",
+                                                            style={"fontSize": "12px", "color": "#888",
+                                                                   "lineHeight": "1.7", "margin": "8px 0 0"},
+                                                        ),
+                                                    ],
+                                                ),
+                                                html.Div(
+                                                    id="diagnostic-stats-output",
+                                                    style={
+                                                        "backgroundColor": "#111820",
+                                                        "border": f"1px solid {_CLR_BORDER}",
+                                                        "borderRadius": "8px",
+                                                        "padding": "14px 16px",
+                                                        "fontSize": "12px",
+                                                        "color": "#ccd",
+                                                        "minHeight": "80px",
+                                                        "lineHeight": "1.8",
+                                                    },
+                                                    children="切換至此頁籤並載入資料後，統計摘要將顯示於此。",
+                                                ),
+                                            ],
+                                        ),
+                                    ],
+                                ),  # end Tab 4
                             ],  # end dcc.Tabs children
                         ),  # end dcc.Tabs
                     ],  # end QC 面板 children
@@ -1505,9 +1585,10 @@ def toggle_mode_controls(mode: str):
     State("stid-store",      "data"),
     State("bundle-key-store", "data"),
     State("trace-meta-store", "data"), # Patch 5-A 新增
+    State("right-panel-tabs", "value"), # Patch 9 新增（可選）：避免非水位頁籤誤觸框選寫出錯誤 SQL
     prevent_initial_call=True,
 )
-def on_selection(selected_data, mode, new_qc, operator, operand, stid, bundle_key, trace_meta): # Patch 5-A 新增結尾, trace_meta
+def on_selection(selected_data, mode, new_qc, operator, operand, stid, bundle_key, trace_meta, active_tab): # Patch 5-A / 9 新增結尾, trace_meta, active_tab
     """
     dcc.Graph.selectedData 或 qc-mode 改變時觸發。
     轉換格式後呼叫對應的 SQL builder，結果寫入 Textarea。
@@ -1515,6 +1596,13 @@ def on_selection(selected_data, mode, new_qc, operator, operand, stid, bundle_ke
     import dash
     ctx = dash.callback_context
     triggered_id = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+
+    # Patch 9（可選）：main-graph 元件在所有頁籤間共用，切到唯讀的「海洋參數」
+    # 或 VdC／暴潮偏差頁籤時，若使用者仍用工具列的 Box Select 拖曳，
+    # 避免用不對應的 trace_meta 產生誤導性的 SQL（sql-output 隱藏在水位頁籤內，
+    # 不guard 也不會出錯，只是內容會悄悄變成錯的，故加此防呆）。
+    if active_tab != "tab-water":
+        return no_update, no_update, no_update
 
     # 如果是 Mode 1/2 但沒框選資料，不產出 SQL
     if mode in ["1", "2"] and not selected_data:
@@ -1608,6 +1696,7 @@ def unlock_page(n_clicks):
     Output("page-lock-status", "children"),
     Output("page-lock-status", "style"),
     Output("trace-meta-store", "data"), # Patch 4-A 新增
+    Output("diagnostic-stats-output", "children"), # Patch 10 新增
     Input("bundle-key-store", "data"),
     Input("url", "search"),
     Input("right-panel-tabs", "value"),
@@ -1638,15 +1727,15 @@ def render_figure(poll_key, url_search, active_tab, diff_type, surge_pred_source
 
     key = target_key
     if not key:
-        return no_update, no_update, no_update, lock_text, lock_style, no_update # Patch 4-B 新增結尾 , no_update
+        return no_update, no_update, no_update, lock_text, lock_style, no_update, no_update # Patch 4-B/10 新增結尾
     if key == "demo":
-        return make_demo_figure(), _DEMO_STID, no_update, lock_text, lock_style, no_update # Patch 4-B 新增結尾 , no_update
+        return make_demo_figure(), _DEMO_STID, no_update, lock_text, lock_style, no_update, no_update # Patch 4-B/10 新增結尾
 
     bundle = dash_bridge.get_bundle(key)
     if bundle is None:
         # return no_update, no_update, no_update
         # 若 key 存在但資料已被 MAX_CACHE_SIZE 清理掉
-        return go.Figure(layout=dict(title="⚠️ 資料快取已過期，請重新從主程式查詢")), no_update, "快取已清空", lock_text, lock_style, no_update # Patch 4-C 新增結尾 , no_update
+        return go.Figure(layout=dict(title="⚠️ 資料快取已過期，請重新從主程式查詢")), no_update, "快取已清空", lock_text, lock_style, no_update, no_update # Patch 4-C/10 新增結尾
 
     bundles = bundle if isinstance(bundle, list) else [bundle]
     primary_stid = bundles[0].get("stid", _DEMO_STID) if bundles else _DEMO_STID
@@ -1679,12 +1768,12 @@ def render_figure(poll_key, url_search, active_tab, diff_type, surge_pred_source
                         f"測站 {stid_key}：{stats.get('status', '未知')}",
                         style={"color": "#d9534f", "marginBottom": "8px"}
                     ))
-            return fig, primary_stid, stats_children or "無統計資料。", lock_text, lock_style, no_update # Patch 4-D 新增結尾 , no_update
+            return fig, primary_stid, stats_children or "無統計資料。", lock_text, lock_style, no_update, no_update # Patch 4-D/10 新增結尾
         except Exception as e:
             import traceback
             traceback.print_exc()   # 印到 server 終端機
             print(f"[VdC ERROR] {e}")
-            return no_update, no_update, f"錯誤：{e}", lock_text, lock_style, no_update # Patch 4-D 新增結尾 , no_update
+            return no_update, no_update, f"錯誤：{e}", lock_text, lock_style, no_update, no_update # Patch 4-D/10 新增結尾
     elif active_tab == "tab-surge":
         try:
             typhoon_info   = dash_bridge.get_typhoon_info()
@@ -1696,20 +1785,79 @@ def render_figure(poll_key, url_search, active_tab, diff_type, surge_pred_source
                 pred_source=surge_pred_source or 'auto',
                 legend_mode=surge_legend_mode or 'shared',
             )
-            return fig, primary_stid, no_update, lock_text, lock_style, no_update
+            return fig, primary_stid, no_update, lock_text, lock_style, no_update, no_update
         except Exception as e:
             import traceback
             traceback.print_exc()   # 印到 server 終端機，方便日後排查
             print(f"[Surge ERROR] {e}")
             err_fig = go.Figure(layout=dict(title=f"⚠️ 暴潮偏差圖表錯誤：{e}"))
-            return err_fig, no_update, no_update, lock_text, lock_style, no_update
+            return err_fig, no_update, no_update, lock_text, lock_style, no_update, no_update
+    elif active_tab == "tab-diagnostic":
+        # Patch 8 新增：唯讀四子圖診斷圖，不產生 trace_meta（不支援 Box Select → SQL）
+        # Patch 10 新增：統計摘要，比照 Tkinter 版 show_stats()，但修正原版的欄位判斷 bug——
+        #   原版一律檢查 'Obs' 欄位來判斷水位是否存在，但 'Obs' 只在「舊系統降級模式」
+        #   （tide_meta 為空）才有；新系統多儀器站的水位欄位其實是 WL_{primary_stid}，
+        #   照原版寫法會讓多儀器站永遠不出現水位統計那一行。這裡改為優先查 tide_meta
+        #   的主測站，查不到才退回舊系統的 'Obs' 欄位。
+        try:
+            lr = dash_bridge.get_land_range()
+            typhoon_label = dash_bridge.get_typhoon_label()
+            fig = build_diagnostic_figure(bundles, land_range=lr, typhoon_label=typhoon_label)
+
+            stats_children = []
+            for b in bundles:
+                df = b.get("df")
+                if df is None or df.empty:
+                    continue
+                tide_meta = b.get("tide_meta") or {}
+                primary_wl_stid = next(
+                    (st for st, m in tide_meta.items() if m.get("is_primary")), None
+                )
+                if primary_wl_stid:
+                    wl_col = f"WL_{primary_wl_stid}"
+                elif "Obs" in df.columns:
+                    wl_col = "Obs"          # 舊系統降級模式備援
+                else:
+                    wl_col = None
+
+                lines = []
+                if wl_col and wl_col in df.columns and df[wl_col].notna().any():
+                    lines.append(f"水位　　| 平均 {df[wl_col].mean():.1f}　"
+                                 f"最高 {df[wl_col].max():.1f}　最低 {df[wl_col].min():.1f} (mm)")
+                if "WS" in df.columns and df["WS"].notna().any():
+                    lines.append(f"風速　　| 平均 {df['WS'].mean():.1f}　最大 {df['WS'].max():.1f} (m/s)")
+                if "H_m" in df.columns and df["H_m"].notna().any():
+                    lines.append(f"示性波高 | 平均 {df['H_m'].mean():.2f}　最大 {df['H_m'].max():.2f} (m)")
+                if "V" in df.columns and df["V"].notna().any():
+                    lines.append(f"流速　　| 平均 {df['V'].mean():.1f}　最大 {df['V'].max():.1f} (cm/s)")
+
+                header = f"{b.get('stname', '未知')}（{b.get('stid', '')}）"
+                if lines:
+                    block = [html.Strong(header, style={"color": "#7eb8f7"})]
+                    for ln in lines:
+                        block.append(html.Br())
+                        block.append(ln)
+                    stats_children.append(html.Div(block, style={"marginBottom": "10px"}))
+                else:
+                    stats_children.append(html.Div(
+                        f"{header}：此區間無可統計資料",
+                        style={"color": "#888", "marginBottom": "10px"},
+                    ))
+
+            return fig, primary_stid, no_update, lock_text, lock_style, no_update, (stats_children or "無統計資料。")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()   # 印到 server 終端機，方便日後排查
+            print(f"[Diagnostic ERROR] {e}")
+            err_fig = go.Figure(layout=dict(title=f"⚠️ 海洋參數診斷圖錯誤：{e}"))
+            return err_fig, no_update, no_update, lock_text, lock_style, no_update, f"錯誤：{e}"
     else:
         lr = dash_bridge.get_land_range()
         typhoon_label = dash_bridge.get_typhoon_label()
         # fig = build_water_figure(bundles, land_range=land_range, typhoon_label=typhoon_label)
         print(f"[DEBUG dash] typhoon_label={repr(typhoon_label)}")
         fig, trace_meta = build_water_figure(bundles, land_range=lr, typhoon_label=typhoon_label) # Patch 4-E 新增 , trace_meta
-        return fig, primary_stid, no_update, lock_text, lock_style, trace_meta # Patch 4-E 新增結尾 , trace_meta
+        return fig, primary_stid, no_update, lock_text, lock_style, trace_meta, no_update # Patch 4-E/10 新增結尾
 
 
 # 改動 B：apply_yaxis_range callback 完整替換

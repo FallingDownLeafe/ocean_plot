@@ -225,6 +225,7 @@ class OceanDataEngine:
         if self.host == "127.0.0.1": return [] # 本地模式直接跳過
         try:
             # --- [核心修改 3] 動態替換颱風資料庫名稱 ---
+            # COLLATE 是因為上游舊庫定序問題，升級前別刪
             query = f"SELECT DISTINCT LEFT(id, 2) as yr FROM {self.typhoon_db}.typhoonid WHERE sponsor='LocalTime' COLLATE utf8mb4_general_ci ORDER BY yr DESC"
             df = pd.read_sql(query, self.conn)
             # return [f"20{y}" for y in df['yr']]
@@ -238,6 +239,7 @@ class OceanDataEngine:
         try:
             if self.typhoon_db == "mrbank":
                 # 安內：欄位名是大寫 WARN1/WARN2，用 AS 統一成程式碼期望的名稱
+                # COLLATE 是因為上游舊庫定序問題，升級前別刪
                 query = f"""SELECT DISTINCT id, cname,
                             WARN1BEG as warnSeaBeg, WARN1END as warnSeaEnd,
                             WARN2BEG as warnLandBeg, WARN2END as warnLandEnd
@@ -246,10 +248,11 @@ class OceanDataEngine:
                             ORDER BY id DESC"""
             else:
                 # 安外 med_data：欄位名原本就是小寫 warnSeaBeg 等
+                # COLLATE 是因為上游舊庫定序問題，升級前別刪
                 query = f"""SELECT DISTINCT id, cname,
                             warnSeaBeg, warnSeaEnd, warnLandBeg, warnLandEnd
                             FROM {self.typhoon_db}.typhoonid
-                            WHERE sponsor='LocalTime' COLLATE utf8mb4_general_ci AND id LIKE '{yr_full[-2:]}%%'
+                            WHERE sponsor='LocalTime' COLLATE utf8mb4_general_ci AND id LIKE '{yr_full[-2:]}%%' 
                             ORDER BY id DESC"""
             return pd.read_sql(query, self.conn)
         except Exception: return pd.DataFrame()
