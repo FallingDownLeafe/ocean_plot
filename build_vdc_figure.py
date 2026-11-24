@@ -16,6 +16,7 @@ build_vdc_figure.py
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import line_style as LW   # 全系統折線粗細（2026-11-20 統一）
 from plotly.subplots import make_subplots
 
 # 視覺字型與配色定義
@@ -338,7 +339,7 @@ def build_vdc_figure(bundles: list, diff_type: str = "auto", zoom_range: dict | 
                         x=diff_line, y=wl_line,
                         mode="lines",
                         line=dict(color="rgba(100,200,255,0.65)",
-                                  width=1.2, dash="dash"),
+                                  width=LW.SUB, dash="dash"),
                         hovertemplate=(
                             f"回歸線　斜率: {slope:.4f}<br>"
                             "差值: %{x:.1f} mm<br>"
@@ -553,7 +554,7 @@ def build_vdc_report_figure(
                     y=wl_ln,
                     mode="lines",
                     line=dict(color="rgba(100,200,255,0.65)",
-                              width=1.2, dash="dash"),
+                              width=LW.SUB, dash="dash"),
                     showlegend=False,
                 ),
                 row=row_idx, col=1,
@@ -588,7 +589,7 @@ def build_vdc_report_figure(
                 x=x_curve,
                 y=_norm.pdf(x_curve, mean_val, std_val),
                 mode="lines",
-                line=dict(color="rgba(255,120,120,0.85)", width=1.8),
+                line=dict(color="rgba(255,120,120,0.85)", width=LW.MAIN),
                 showlegend=False,
             ),
             row=row_idx, col=2,

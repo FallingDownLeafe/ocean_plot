@@ -12,7 +12,7 @@ build_surge_report_figure.py
     - 觀測(藍)/預報(綠)/Resi(紅)：fetch_bundle() 回傳 df 裡的
       WL_{primary}、WL_{primary}_pred_h、Resi 三欄（僅主測站 QC=Q 校正值）
     - 站碼/站名：bundle['tide_meta'][primary_stid]（stnac + stid_obs/stid_new）
-    - 門檻值：get_tsuwawa_thresholds()，查 tsuwawa.warn
+    - 門檻值：get_tsuwawa_thresholds()，查 tsuwawa.warn → 2026.08.24 改為查 med.p_setting_warn
       （與 mrbank 同主機 .71，安外鏡像在 .160/.104，帳號 dps 純 SELECT）
 
 ============================================================
@@ -44,6 +44,7 @@ PATCH（套用到 ocean_plot_dash.py，OceanDataEngine.query_multi_tide_data）
 
 import pandas as pd
 import plotly.graph_objects as go
+import line_style as LW   # 全系統折線粗細（2026-11-20 統一）
 
 
 _FONT = "PingFang TC, Noto Sans CJK TC, Arial, sans-serif"
@@ -73,8 +74,9 @@ def get_tsuwawa_thresholds(conn, stid: str) -> dict | None:
 
     沿用既有的 mrbank connection，以 `tsuwawa.warn` 全名跨 schema 查詢
     （tsuwawa 與 mrbank 同主機 .71，安外鏡像在 .160/.104）。
+    2026.08.24 更新；但med.p_setting_warn 只在 .160/.104。
 
-    注意：dps 帳號需對 tsuwawa schema 有 SELECT 權限，若權限不足會拋
+    注意：dps 帳號需對 tsuwawa/med schema 有 SELECT 權限，若權限不足會拋
     mysql.connector 的 Access denied 例外，請在第一次測試時順便確認。
 
     Parameters
@@ -88,9 +90,19 @@ def get_tsuwawa_thresholds(conn, stid: str) -> dict | None:
     -------
     dict | None
         {"警戒值_mm": float, "注意值_mm": float}
-        查無資料（該站不在 tsuwawa.warn 裡）時回傳 None。
+        查無資料（該站不在 tsuwawa.warn 或 med.p_setting_warn  裡）時回傳 None。
     """
-    query = "SELECT WARNVAL, STIDE FROM tsuwawa.warn WHERE STID = %s"
+    # 執行 R9 測試時 Claude 查出這寫法不對， self 沒定義，會拋錯誤，整個環節卡住。若發生某種重查意外似乎能重新畫出半成品圖只缺兩條警戒線（但這種半成品不能用）。
+    # 但印象中當初是 Claude 為了怕查不到外部資料庫會整個水位查詢都卡住才把 Gemini 建議的資料庫IP分流版本加上這些 ext_conn = None 偵測的，結果怎麼反而到處出事？
+    # 而且 Claude 這次解釋說**med.p_setting_warn 在 .160（與 primary DB 同主機），用傳入的 conn（self.e.conn）跨 schema 查詢即可，不需要 ext_conn。return [] 也順手改成與函式簽名一致的 return None。**
+    # 但我移到安內以後 primary DB 就變成 .71 了，那這樣改等打包完去安內執行應該會出事吧？這裡應該要改真的外部 IP 才對？還是其實這根本可以不用偵測，反正不影響？因為如果系統能執行到這裡那 primary DB 一定有連通，何必要偵測？還是我有理解錯這個 If 的用途？
+    # 但感覺其實問題不在這裡？因為現在就算是安外測試，改成 conn 也一樣出不了圖。
+    # if self.ext_conn is None: 
+    #     return []   # 或 return None
+    if conn is None:
+        return None
+    # query = "SELECT WARNVAL, STIDE FROM tsuwawa.warn WHERE STID = %s"
+    query = "SELECT WARNVAL, STIDE FROM med.p_setting_warn WHERE STID = %s" # 更新警戒值資料源（注意IP）
     df = pd.read_sql(query, conn, params=(stid,))
     if df.empty:
         return None
@@ -99,6 +111,48 @@ def get_tsuwawa_thresholds(conn, stid: str) -> dict | None:
         "警戒值_mm": float(df.iloc[0]["WARNVAL"]) * 1000,
         "注意值_mm": float(df.iloc[0]["STIDE"]) * 1000,
     }
+
+# Claude Sonnet 5 High 給的這段函式到底是不是在假裝有產出？
+# 上一個對話裡 Sonnet 4.6 High 已經讀過 main_app.py 完整程式碼，判斷 thresholds_map[sid] = self.ENGINE.get_thresholds(sid) 這行是關鍵。
+# 所以 data_engine.get_thresholds() 回傳的 dict key 是 'stide_mm' / 'warnval_mm'。
+# 上一個對話讀完程式碼應該已經知道 main_app.py 沒有 go() 函式了？還是我對 go() 函式的理解跟模型不一樣？
+# 該不會每個新對話都要重新猜一次入口程式有個 go() 函式吧？到底為什麼？明明一開始模型就沒把這個函式寫出來過吧？ V2 哪支程式都找不到 def go ()，只有 V1 有。
+# Sonnet 5 到底怎麼映射這些語言？我跟他的理解哪裡不同？
+# 還是是專案記憶記得 V1 有就以為 V2 也有？那為什麼當初模型寫 V2 的時候不用寫？是因為 V2 不用分 mode 嗎？如果是，那模型自己為什麼讀不出來這件事？是因為缺 SYSTEM_V2_FRAMEWORK.md 設計文件嗎？
+def _resolve_threshold_values(thresholds: dict | None) -> tuple:
+    """
+    統一解析門檻值 dict 的 key 名稱，避免各呼叫端各自猜測造成不一致。
+
+    已知可能來源／命名：
+      - get_tsuwawa_thresholds()（本檔案）回傳：'警戒值_mm' / '注意值_mm'
+      - main_app.py go() 存入 dash_bridge 的 thresholds_map：實際 key 名稱
+        尚未取得 main_app.py 原始碼確認過，這裡同時嘗試英文 snake_case
+        寫法（'stide_mm' / 'warnval_mm'，R9 對 build_surge_interactive_figure()
+        的暫時修補猜測），三種寫法都取不到才視為真的查無資料。
+
+    ⚠️ 待辦：向 Eva 取得 main_app.py go() 或 thresholds_map 組裝處的原始碼，
+    確認實際 key 名稱後，這裡可以收斂成單一寫法，不用再多方嘗試。
+
+    Returns
+    -------
+    (stide_mm, warnval_mm) : tuple[float | None, float | None]
+    """
+    if not thresholds:
+        return None, None
+
+    stide_mm = thresholds.get('注意值_mm')
+    if stide_mm is None:
+        stide_mm = thresholds.get('stide_mm')
+    if stide_mm is None:
+        stide_mm = thresholds.get('注意值mm')  # R9 舊猜測寫法（缺底線），保留相容
+
+    warnval_mm = thresholds.get('警戒值_mm')
+    if warnval_mm is None:
+        warnval_mm = thresholds.get('warnval_mm')
+    if warnval_mm is None:
+        warnval_mm = thresholds.get('警戒值mm')
+
+    return stide_mm, warnval_mm
 
 
 def build_surge_report_figure(
@@ -187,7 +241,7 @@ def build_surge_report_figure(
         fig.add_trace(go.Scatter(
             x=df['Time'], y=df[col_obs],
             mode='lines', name='觀測水位',
-            line=dict(color=_COLOR_OBS, width=1.5),
+            line=dict(color=_COLOR_OBS, width=LW.MAIN),
             connectgaps=False,
         ))
 
@@ -196,7 +250,7 @@ def build_surge_report_figure(
         fig.add_trace(go.Scatter(
             x=df['Time'], y=df[col_pred],
             mode='lines', name=pred_label,
-            line=dict(color=_COLOR_PRED, width=1.2),
+            line=dict(color=_COLOR_PRED, width=LW.SUB),
         ))
 
     # --- §3 暴潮偏差 Resi（右軸） ---
@@ -220,41 +274,77 @@ def build_surge_report_figure(
         fig.add_trace(go.Scatter(
             x=df['Time'], y=resi_series,
             mode='lines', name='暴潮偏差',
-            line=dict(color=_COLOR_RESI, width=1.5),
+            line=dict(color=_COLOR_RESI, width=LW.MAIN),
             yaxis='y2',
         ))
 
-    # Gemini pro 嘗試優化
-    # --- §4 潮位注意值／警戒值（改用 Scatter 繪製，即可自動加入圖例並保持互動性） ---
     y2_range = None
-    if thresholds is not None and not df.empty:
+    stide_mm, warnval_mm = _resolve_threshold_values(thresholds)
+    if not df.empty and (stide_mm is not None or warnval_mm is not None):
         # 取得 X 軸（時間軸）的起點與終點，讓水平線能完美橫跨整張圖
         x_start = df['Time'].min()
         x_end = df['Time'].max()
-        
+
         # 1. 潮位注意值
-        fig.add_trace(go.Scatter(
-            x=[x_start, x_end],
-            y=[thresholds['注意值_mm'], thresholds['注意值_mm']],
-            mode='lines',
-            name=f"潮位注意值", # 主管說數值沒人在意不用寫幾mm出來
-            # name=f"潮位注意值 ({thresholds['注意值_mm']:.0f}mm)",
-            line=dict(color=_COLOR_STIDE, dash='dash', width=1.2),
-            hoverinfo='skip',  # 滑鼠移過去時「不要」顯示這條線的 tooltip，避免干擾數據判讀
-            showlegend=True
-        ))
-        
+        if stide_mm is not None:
+            fig.add_trace(go.Scatter(
+                x=[x_start, x_end],
+                y=[stide_mm, stide_mm],
+                mode='lines',
+                name=f"潮位注意值", # 主管說數值沒人在意不用寫幾mm出來
+                line=dict(color=_COLOR_STIDE, dash='dash', width=LW.SUB),
+                hoverinfo='skip',
+                showlegend=True
+            ))
+
         # 2. 潮位警戒值
-        fig.add_trace(go.Scatter(
-            x=[x_start, x_end],
-            y=[thresholds['警戒值_mm'], thresholds['警戒值_mm']],
-            mode='lines',
-            name=f"潮位警戒值", # 主管說數值沒人在意不用寫幾mm出來
-            # name=f"潮位警戒值 ({thresholds['警戒值_mm']:.0f}mm)",
-            line=dict(color=_COLOR_WARNVAL, dash='dash', width=1.2),
-            hoverinfo='skip',  # 同樣忽略懸停提示
-            showlegend=True
-        ))
+        if warnval_mm is not None:
+            fig.add_trace(go.Scatter(
+                x=[x_start, x_end],
+                y=[warnval_mm, warnval_mm],
+                mode='lines',
+                name=f"潮位警戒值", # 主管說數值沒人在意不用寫幾mm出來
+                line=dict(color=_COLOR_WARNVAL, dash='dash', width=LW.SUB),
+                hoverinfo='skip',
+                showlegend=True
+            ))
+    elif thresholds is None:
+        fig.add_annotation(
+            text="警戒值查無資料",
+            xref="paper", yref="paper", x=0.99, y=0.02,
+            showarrow=False, font=dict(color='red', size=12),
+        )
+    # # Gemini pro 嘗試優化
+    # # --- §4 潮位注意值／警戒值（改用 Scatter 繪製，即可自動加入圖例並保持互動性） ---
+    # y2_range = None
+    # if thresholds is not None and not df.empty:
+    #     # 取得 X 軸（時間軸）的起點與終點，讓水平線能完美橫跨整張圖
+    #     x_start = df['Time'].min()
+    #     x_end = df['Time'].max()
+        
+    #     # 1. 潮位注意值
+    #     fig.add_trace(go.Scatter(
+    #         x=[x_start, x_end],
+    #         y=[thresholds['注意值_mm'], thresholds['注意值_mm']],
+    #         mode='lines',
+    #         name=f"潮位注意值", # 主管說數值沒人在意不用寫幾mm出來
+    #         # name=f"潮位注意值 ({thresholds['注意值_mm']:.0f}mm)",
+    #         line=dict(color=_COLOR_STIDE, dash='dash', width=1.2),
+    #         hoverinfo='skip',  # 滑鼠移過去時「不要」顯示這條線的 tooltip，避免干擾數據判讀
+    #         showlegend=True
+    #     ))
+        
+    #     # 2. 潮位警戒值
+    #     fig.add_trace(go.Scatter(
+    #         x=[x_start, x_end],
+    #         y=[thresholds['警戒值_mm'], thresholds['警戒值_mm']],
+    #         mode='lines',
+    #         name=f"潮位警戒值", # 主管說數值沒人在意不用寫幾mm出來
+    #         # name=f"潮位警戒值 ({thresholds['警戒值_mm']:.0f}mm)",
+    #         line=dict(color=_COLOR_WARNVAL, dash='dash', width=1.2),
+    #         hoverinfo='skip',  # 同樣忽略懸停提示
+    #         showlegend=True
+    #     ))
     # # --- §4 潮位注意值／警戒值（左軸水平線，範圍固定涵蓋兩線） ---
     # # 印象中這應該是我 prompt 說明給錯，而非 Claude 誤判，下次自己要注意提的需求正確性。
     # y2_range = None
@@ -339,8 +429,9 @@ def build_surge_report_figure(
             
         # 海警文字標籤（放在 y=1.09，位置最高，與陸警錯開）
         sea_mid = sea_beg_ts + (sea_end_ts - sea_beg_ts) / 2
+        # 2026-11-20：改用像素位移（yshift）定位，圖高不同時也不會撞到標題
         fig.add_annotation(
-            x=sea_mid, y=1.09, xref='x', yref='paper',
+            x=sea_mid, y=1, xref='x', yref='paper', yanchor='bottom', yshift=20,
             text=f"海警 {sea_beg_ts:%m/%d %H:%M} - {sea_end_ts:%m/%d %H:%M}",
             showarrow=False, font=dict(color='rgba(60, 110, 160, 0.9)', size=11), xanchor='center',
         )
@@ -365,9 +456,16 @@ def build_surge_report_figure(
             
         # 陸警文字標籤（維持在原有的 y=1.03）
         # land_mid = land_beg_ts + (land_end_ts - land_beg_ts) / 2
-        land_mid = sea_beg_ts + (sea_end_ts - sea_beg_ts) / 2   #跟海警文字對齊看會不會比較好...但Claude說如果沒有海警要用上面那行，只是哪次颱風會沒有海警只有陸警？
+        # 2026-11-20：實務上不會只有陸警，但資料表海警欄位若漏填（NULL），sea_beg_ts 未定義、
+        # 整張圖會畫不出來；只有這種資料缺漏時才退回陸警中點，正常情況仍對齊海警中點。
+        _has_sea = (sea_beg is not None and sea_end is not None
+                    and pd.notna(sea_beg) and pd.notna(sea_end))
+        if _has_sea:
+            land_mid = sea_beg_ts + (sea_end_ts - sea_beg_ts) / 2   #跟海警文字對齊看會不會比較好...但Claude說如果沒有海警要用上面那行，只是哪次颱風會沒有海警只有陸警？
+        else:
+            land_mid = land_beg_ts + (land_end_ts - land_beg_ts) / 2
         fig.add_annotation(
-            x=land_mid, y=1.03, xref='x', yref='paper',
+            x=land_mid, y=1, xref='x', yref='paper', yanchor='bottom', yshift=3,
             text=f"陸警 {land_beg_ts:%m/%d %H:%M} - {land_end_ts:%m/%d %H:%M}",
             showarrow=False, font=dict(color='rgba(210, 60, 60, 0.9)', size=11), xanchor='center',
             # showarrow=False, font=dict(color='#444444', size=11), xanchor='center',
@@ -384,6 +482,28 @@ def build_surge_report_figure(
         f"{stname}（舊站碼 {stid_display}/ 新站碼 {stid_new}）"
     )
 
+    # === 新增：計算左軸(水位)與右軸(偏差)的 20% 留白範圍 ===
+    # 1. 計算左軸 (水位) 範圍 (必須包含警戒值，避免線條被切掉)
+    y_vals = []
+    if col_obs in df.columns: y_vals.extend([df[col_obs].min(), df[col_obs].max()])
+    if col_pred is not None and col_pred in df.columns: y_vals.extend([df[col_pred].min(), df[col_pred].max()])
+    if stide_mm is not None: y_vals.append(stide_mm)
+    if warnval_mm is not None: y_vals.append(warnval_mm)
+    
+    y_range = None
+    y_vals = [v for v in y_vals if pd.notna(v)] # 過濾空值
+    if y_vals:
+        y_min, y_max = min(y_vals), max(y_vals)
+        span = y_max - y_min if (y_max - y_min) != 0 else 100
+        y_range = [y_min - span * 0.20, y_max + span * 0.20]
+
+    # 2. 計算右軸 (暴潮偏差) 範圍
+    if resi_series is not None and resi_series.notna().any():
+        r_min, r_max = resi_series.min(), resi_series.max()
+        span_r = r_max - r_min if (r_max - r_min) != 0 else 100
+        y2_range = [r_min - span_r * 0.20, r_max + span_r * 0.20]
+    # ====================================================
+
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor='center', font=dict(family=_FONT, size=24, color='black')), # 標題置中看看效果，要改可移除或調整
         plot_bgcolor='white',
@@ -392,7 +512,7 @@ def build_surge_report_figure(
         hovermode='x unified',
         # xaxis=dict(title='時間', showgrid=True, gridcolor='rgba(0,0,0,0.08)'), # 主管認為這種顯示方式不夠精簡
         xaxis=dict(title='時間', tickformat="%Y/%-m/%-d %H:%M", showgrid=True, gridcolor='rgba(0,0,0,0.08)'),
-        yaxis=dict(title='水位 (mm)', showgrid=True, gridcolor='rgba(0,0,0,0.08)'),
+        yaxis=dict(title='水位 (mm)', showgrid=True, gridcolor='rgba(0,0,0,0.08)', range=y_range), # 這裡加上 range=y_range
         yaxis2=dict(
             title='暴潮偏差 (mm)', overlaying='y', side='right',
             showgrid=False, range=y2_range,
@@ -400,7 +520,7 @@ def build_surge_report_figure(
         legend=dict(orientation='h', y=-0.18),
         # margin=dict(t=90, b=70),
         # Gemini建議稍微調大 t (top) 數值，給頂部的海陸警文字騰出呼吸空間
-        margin=dict(t=130, b=50, l=50, r=50),
+        margin=dict(t=160, b=50, l=50, r=50),   # 2026-11-20：130→160，颱風標題兩行＋海警／陸警文字不重疊
     )
 
     # Gemini建議的設定，看起來似乎是直接接在後面就好？
@@ -434,6 +554,7 @@ def build_surge_interactive_figure(
     thresholds_map: dict | None,
     pred_source: str = 'auto',
     legend_mode: str = 'shared',   # 'shared'：全圖共用一組圖例（置底）／'individual'：每個子圖各自一組（內嵌右上角）
+    y_axis_mode: str = 'auto',  # # 'auto'：各站獨立 20% 留白；'fixed'：跨站全域統一範圍 
 ) -> go.Figure:
     """
     多站互動式暴潮偏差圖（深色主題，供 Dash dcc.Graph 使用）。
@@ -491,6 +612,48 @@ def build_surge_interactive_figure(
     _CLR_WARNVAL_D = '#e8864f'
 
     legend_layout_updates = {}   # legend_mode='individual' 時，收集每個子圖的專屬圖例位置設定
+
+    # ── fixed 模式：預計算跨站全域 Y 軸範圍（主迴圈前）────────────────────
+    _global_y_range: list | None = None
+    _global_y2_range: list | None = None
+    if y_axis_mode == 'fixed':
+        _gy, _gy2 = [], []
+        for _b in bundles:
+            # _df = _b.get('df') or pd.DataFrame()
+            _df = _b.get('df')
+            if _df is None:
+                _df = pd.DataFrame()
+            if _df.empty:
+                continue
+            _tm = _b.get('tide_meta') or {}
+            _ps = next((s for s, m in _tm.items() if m.get('is_primary')), None)
+            _c_obs = f'WL_{_ps}' if _ps else 'Obs'
+            _c_pa  = f'WL_{_ps}_pred_a' if _ps else None
+            _c_ph  = f'WL_{_ps}_pred_h' if _ps else 'Pre'
+            if _c_obs in _df.columns:
+                _gy += _df[_c_obs].dropna().tolist()
+            _c_pred = next((c for c in [_c_pa, _c_ph] if c and c in _df.columns), None)
+            if _c_pred:
+                _gy += _df[_c_pred].dropna().tolist()
+                if _c_obs in _df.columns:
+                    _gy2 += (_df[_c_obs] - _df[_c_pred]).dropna().tolist()
+                elif 'Resi' in _df.columns:
+                    _gy2 += _df['Resi'].dropna().tolist()
+            elif 'Resi' in _df.columns:
+                _gy2 += _df['Resi'].dropna().tolist()
+            _th = (thresholds_map or {}).get(_b.get('stid', ''))
+            _sm, _wm = _resolve_threshold_values(_th)
+            if _sm is not None: _gy.append(_sm)
+            if _wm is not None: _gy.append(_wm)
+        if _gy:
+            _mn, _mx = min(_gy), max(_gy)
+            _sp = _mx - _mn if _mx != _mn else 1000
+            _global_y_range = [_mn - _sp * 0.10, _mx + _sp * 0.10]
+        if _gy2:
+            _mn2, _mx2 = min(_gy2), max(_gy2)
+            _sp2 = _mx2 - _mn2 if _mx2 != _mn2 else 500
+            _global_y2_range = [_mn2 - _sp2 * 0.10, _mx2 + _sp2 * 0.10]
+    # ────────────────────────────────────────────────────────────────────────
 
     for i, bundle in enumerate(bundles):
         row         = i // n_cols + 1
@@ -558,7 +721,7 @@ def build_surge_interactive_figure(
                 go.Scatter(
                     x=df['Time'], y=df[col_obs],
                     mode='lines', name='觀測水位',
-                    line=dict(color=_CLR_OBS_D, width=1.5),
+                    line=dict(color=_CLR_OBS_D, width=LW.MAIN),
                     connectgaps=False,
                     legendgroup=f'obs{grp_suffix}',
                     showlegend=show_legend,
@@ -573,7 +736,7 @@ def build_surge_interactive_figure(
                 go.Scatter(
                     x=df['Time'], y=df[col_pred],
                     mode='lines', name=pred_label,
-                    line=dict(color=_CLR_PRED_D, width=1.2, dash='dot'),
+                    line=dict(color=_CLR_PRED_D, width=LW.SUB, dash='dot'),
                     legendgroup=f'pred{grp_suffix}',
                     showlegend=show_legend,
                     **legend_kw,
@@ -589,12 +752,18 @@ def build_surge_interactive_figure(
         else:
             resi_series = None
 
+        # y2_range = None # 初始化
         if resi_series is not None and resi_series.notna().any():
+            # # 計算最大最小值並加上 50mm 留白
+            # resi_max = resi_series.max()
+            # resi_min = resi_series.min()
+            # padding = 50
+            # y2_range = [resi_min - padding, resi_max + padding]
             fig.add_trace(
                 go.Scatter(
                     x=df['Time'], y=resi_series,
                     mode='lines', name='暴潮偏差',
-                    line=dict(color=_CLR_RESI_D, width=1.5),
+                    line=dict(color=_CLR_RESI_D, width=LW.MAIN),
                     legendgroup=f'resi{grp_suffix}',
                     showlegend=show_legend,
                     **legend_kw,
@@ -603,36 +772,71 @@ def build_surge_interactive_figure(
             )
 
         # §4 門檻線（注意值 / 警戒值，左軸）
+        # thresholds = (thresholds_map or {}).get(stid_b)
+        # if thresholds and not df.empty:
+        #     x_start = df['Time'].min()
+        #     x_end   = df['Time'].max()
+        #     fig.add_trace(
+        #         go.Scatter(
+        #             x=[x_start, x_end],
+        #             # y=[thresholds['注意值_mm']] * 2,
+        #             y=[thresholds.get('stide_mm', thresholds.get('注意值mm', 0))] * 2,
+        #             mode='lines', name='潮位注意值',
+        #             line=dict(color=_CLR_STIDE_D, dash='dash', width=1.2),
+        #             hoverinfo='skip',
+        #             legendgroup=f'stide{grp_suffix}',
+        #             showlegend=show_legend,
+        #             **legend_kw,
+        #         ),
+        #         row=row, col=col, secondary_y=False,
+        #     )
+        #     fig.add_trace(
+        #         go.Scatter(
+        #             x=[x_start, x_end],
+        #             # y=[thresholds['警戒值_mm']] * 2,
+        #             y=[thresholds.get('warnval_mm', thresholds.get('警戒值mm', 0))] * 2,
+        #             mode='lines', name='潮位警戒值',
+        #             line=dict(color=_CLR_WARNVAL_D, dash='dash', width=1.2),
+        #             hoverinfo='skip',
+        #             legendgroup=f'warnval{grp_suffix}',
+        #             showlegend=show_legend,
+        #             **legend_kw,
+        #         ),
+        #         row=row, col=col, secondary_y=False,
+        #     )
         thresholds = (thresholds_map or {}).get(stid_b)
-        if thresholds and not df.empty:
+        stide_mm, warnval_mm = _resolve_threshold_values(thresholds)
+        if not df.empty and (stide_mm is not None or warnval_mm is not None):
             x_start = df['Time'].min()
             x_end   = df['Time'].max()
-            fig.add_trace(
-                go.Scatter(
-                    x=[x_start, x_end],
-                    y=[thresholds['注意值_mm']] * 2,
-                    mode='lines', name='潮位注意值',
-                    line=dict(color=_CLR_STIDE_D, dash='dash', width=1.2),
-                    hoverinfo='skip',
-                    legendgroup=f'stide{grp_suffix}',
-                    showlegend=show_legend,
-                    **legend_kw,
-                ),
-                row=row, col=col, secondary_y=False,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=[x_start, x_end],
-                    y=[thresholds['警戒值_mm']] * 2,
-                    mode='lines', name='潮位警戒值',
-                    line=dict(color=_CLR_WARNVAL_D, dash='dash', width=1.2),
-                    hoverinfo='skip',
-                    legendgroup=f'warnval{grp_suffix}',
-                    showlegend=show_legend,
-                    **legend_kw,
-                ),
-                row=row, col=col, secondary_y=False,
-            )
+            if stide_mm is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[x_start, x_end],
+                        y=[stide_mm] * 2,
+                        mode='lines', name='潮位注意值',
+                        line=dict(color=_CLR_STIDE_D, dash='dash', width=LW.SUB),
+                        hoverinfo='skip',
+                        legendgroup=f'stide{grp_suffix}',
+                        showlegend=show_legend,
+                        **legend_kw,
+                    ),
+                    row=row, col=col, secondary_y=False,
+                )
+            if warnval_mm is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[x_start, x_end],
+                        y=[warnval_mm] * 2,
+                        mode='lines', name='潮位警戒值',
+                        line=dict(color=_CLR_WARNVAL_D, dash='dash', width=LW.SUB),
+                        hoverinfo='skip',
+                        legendgroup=f'warnval{grp_suffix}',
+                        showlegend=show_legend,
+                        **legend_kw,
+                    ),
+                    row=row, col=col, secondary_y=False,
+                )
 
         # §5 颱風警報色帶
         sea_beg = typhoon_info.get('warnSeaBeg')
@@ -656,9 +860,41 @@ def build_surge_interactive_figure(
             )
 
         # §6 軸標籤
-        fig.update_yaxes(title_text='水位 (mm)',    secondary_y=False, row=row, col=col)
-        fig.update_yaxes(title_text='暴潮偏差 (mm)', secondary_y=True,  row=row, col=col,
-                         showgrid=False)
+        # fig.update_yaxes(title_text='水位 (mm)',    secondary_y=False, row=row, col=col)
+        # fig.update_yaxes(title_text='暴潮偏差 (mm)', secondary_y=True,  row=row, col=col,
+        #                 showgrid=False)
+        #                 #  showgrid=False, range=y2_range)
+
+        # === 新增：計算該子圖左軸與右軸的 20% 留白範圍 ===
+
+        # ── Y 軸範圍：auto 各站獨立 20% 留白；fixed 套用全域預計算範圍 ──
+        if y_axis_mode == 'fixed':
+            y_range  = _global_y_range
+            y2_range = _global_y2_range
+        else:
+            y_vals = []
+            if col_obs in df.columns:
+                y_vals.extend([df[col_obs].min(), df[col_obs].max()])
+            if col_pred is not None and col_pred in df.columns:
+                y_vals.extend([df[col_pred].min(), df[col_pred].max()])
+            if stide_mm is not None: y_vals.append(stide_mm)
+            if warnval_mm is not None: y_vals.append(warnval_mm)
+            y_vals   = [v for v in y_vals if pd.notna(v)]
+            y_range  = None
+            if y_vals:
+                y_min, y_max = min(y_vals), max(y_vals)
+                span = y_max - y_min if (y_max - y_min) != 0 else 100
+                y_range = [y_min - span * 0.20, y_max + span * 0.20]
+            y2_range = None
+            if resi_series is not None and resi_series.notna().any():
+                r_min, r_max = resi_series.min(), resi_series.max()
+                span_r = r_max - r_min if (r_max - r_min) != 0 else 100
+                y2_range = [r_min - span_r * 0.20, r_max + span_r * 0.20]
+
+        # §6 軸標籤 (套用計算好的範圍)
+        fig.update_yaxes(title_text='水位 (mm)',    secondary_y=False, row=row, col=col, range=y_range)
+        fig.update_yaxes(title_text='暴潮偏差 (mm)', secondary_y=True,  row=row, col=col, showgrid=False, range=y2_range)
+        # ====================================================
 
     ty_id   = typhoon_info.get('id',    '')
     ty_name = typhoon_info.get('cname', '')
